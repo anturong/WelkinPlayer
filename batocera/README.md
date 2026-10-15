@@ -259,3 +259,58 @@ Welkin个人复现版/
 - 修复版 AppImage 内额外打包的 GStreamer 插件与 FFmpeg/libav 运行时来自 **Ubuntu 22.04 (jammy)** 官方软件包，
   对应组件分别为 **LGPL-2.1+/GPL** 许可；重新分发时请保留其许可与来源说明（可用 `build/fetch-payload.py` 复核来源）。
 - 本套件只做「打包与运行时适配」，未修改 WelkinPlayer 的任何源代码。
+
+---
+
+## 常见问题
+
+### 界面正常、歌名也在，但按播放没声音
+
+**优先怀疑音乐库路径失效，而不是音频栈**（判断依据：ES 菜单/视频预览有声音，只有 Welkin 没声音）。
+
+Welkin 的「本地音乐」源保存的是**绝对路径**。在 VMware 直通或多盘环境下，Batocera 的盘符会漂移：
+同一块 1TB USB，某次开机是 `/dev/sda3` → `/media/sda3`，插上直通盘那次变成 `/dev/sdc3` → `/media/sdc3`。
+盘符一变，库缓存里歌名还在（界面看着正常），但文件找不到 → **一点播放就静默失败**，听起来就是「没声音」。
+
+修法：把源指到 Batocera 的 **mergerfs 视图 `/userdata/roms/music`**，它对盘符变化免疫：
+
+```bash
+# 看当前配置
+grep rootPath /userdata/system/.local/share/com.atemukesu.welkinplayer/settings.json
+
+# 改成稳定路径（应用没在运行时操作）
+python3 - <<'PY'
+import io, json
+p = "/userdata/system/.local/share/com.atemukesu.welkinplayer/settings.json"
+d = json.load(io.open(p, encoding="utf-8"))
+for s in d.get("sources", []):
+    s["rootPath"] = "/userdata/roms/music"
+io.open(p, "w", encoding="utf-8").write(json.dumps(d, ensure_ascii=False, indent=2))
+PY
+```
+
+重启应用后，日志里应出现 `refreshed source …: N files`（N = 实际曲目数）。
+
+### 怎么区分「路径问题」和「音频问题」
+
+用 app 自带的那套库直接播一首（绕过 Welkin 自身逻辑）：
+
+```bash
+AP=$(pgrep -f "welkinplayer --no-sandbox" | head -1)
+APPDIR=$(tr '\0' '\n' < /proc/$AP/environ | grep '^APPDIR=' | cut -d= -f2)
+env -i DISPLAY=:0.0 HOME=/userdata/system PATH=/usr/bin:/bin XDG_RUNTIME_DIR=/var/run \
+    LD_LIBRARY_PATH="$APPDIR/usr/lib:$APPDIR/usr/lib/x86_64-linux-gnu" \
+    GST_PLUGIN_SYSTEM_PATH_1_0="$APPDIR/usr/lib/gstreamer-1.0" \
+    GST_PLUGIN_SCANNER="$APPDIR/usr/lib/gstreamer-1.0/gst-plugin-scanner" \
+    GST_PLUGIN_FEATURE_RANK=mpg123audiodec:MAX \
+    timeout 10 gst-launch-1.0 playbin uri="file:///userdata/roms/music/某首歌.mp3" 2>&1 | tail -3
+```
+
+- 出现 `New clock: GstPulseSinkClock`（或 `GstAlsaSinkClock`）→ **音频链路正常**，问题在库路径/曲目状态
+- 报 `missing a plug-in` / `not found` → 是打包或插件问题，看第 5 节与构建陷阱
+
+### 播放器卡死 / 整屏白屏
+
+- 白屏：`WEBKIT_DISABLE_DMABUF_RENDERER=1` 没生效（修复版已内嵌；若被别的脚本覆盖请检查 AppRun 钩子）
+- 卡死：`WebKitWebProcess` 崩了 —— 先看 `/userdata/system/logs/welkin-app.log` 里的 `not found` / `plugin loader` 关键字
+- 快速判断白屏：抓屏文件大小，白屏约 8~12 KB，正常界面 >200 KB
