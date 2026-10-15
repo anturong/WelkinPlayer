@@ -1,5 +1,20 @@
 # Welkin on Batocera — 个人复现版
 
+---
+
+## 0. 已发布的成品
+
+| 内容 | 地址 |
+| --- | --- |
+| 分支 | https://github.com/anturong/WelkinPlayer/tree/batocera |
+| Release（成品 AppImage + payload） | https://github.com/anturong/WelkinPlayer/releases/tag/batocera-1.0.2-r1 |
+
+Release 资产：
+
+- `Welkin_1.0.2_amd64-fixed.AppImage` — 116.7 MB，sha256 `688FCAB8561C0BE7EA6C30263500D15FDD07C9127BF59A399F6E1470345826ED`
+  （自包含修复版，拷到 `/userdata/system/` 配 8 行启动脚本即可）
+- `welkin-payload.tar.zst` — 68.2 MB，sha256 `C79A87248AB7A4764ECD28A9F0CC03444739A03C2CD6B882B65B53BC5368260B`
+  （解压得到 `payload/`，配合 `build/repack-welkin.sh` 可对任意 Welkin AppImage 重新打包）
 **一句话**：把 `Welkin_1.0.2_amd64-fixed.AppImage` 拷到 Batocera 的 `/userdata/system/`，再放一个启动脚本，Ports 菜单就能放出声音。
 
 ---
