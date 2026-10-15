@@ -205,8 +205,49 @@ const amllLines = computed(() => {
   });
 });
 
+/** Scrub state: while dragging, hold a local value so engine ticks can't move the thumb. */
+const seekValue = ref<number | null>(null);
+const sliderValue = computed(() => seekValue.value ?? player.progress);
+let pointerSeeking = false;
+let pointerCommitDone = false;
+
 function onSeek(event: Event) {
-  seekPercent(Number((event.target as HTMLInputElement).value));
+  const value = Number((event.target as HTMLInputElement).value);
+  if (!Number.isFinite(value)) return;
+  seekValue.value = value;
+  pointerCommitDone = false;
+  seekPercent(value, false);
+}
+
+function commitSeek(event: Event) {
+  // `change` handles keyboard and is the normal release path, but the webview
+  // can skip it after a pointer release; a pointer gesture already commits.
+  if (pointerSeeking) return;
+  if (pointerCommitDone) {
+    pointerCommitDone = false;
+    return;
+  }
+  const value = Number((event.target as HTMLInputElement).value);
+  if (!Number.isFinite(value)) return;
+  seekValue.value = null;
+  seekPercent(value, true);
+}
+
+function beginSeek() {
+  pointerSeeking = true;
+  pointerCommitDone = false;
+  seekValue.value = player.progress;
+}
+
+function endSeek() {
+  if (!pointerSeeking) return;
+  pointerSeeking = false;
+  if (pointerCommitDone) return;
+  const value = seekValue.value;
+  if (value === null) return;
+  pointerCommitDone = true;
+  seekValue.value = null;
+  seekPercent(value, true);
 }
 
 /** Jump to the start of a clicked lyric line. */
@@ -319,14 +360,19 @@ function onLyricSeek(timeMs: number) {
         <div class="w-full max-w-[420px]">
           <div class="flex h-[9px] items-center">
             <input
-              :value="player.progress"
-              :style="{ '--fill': percent(player.progress), '--buffered': percent(player.bufferedProgress) }"
+              :value="sliderValue"
+              :style="{ '--fill': percent(sliderValue), '--buffered': percent(player.bufferedProgress) }"
               class="ak-slider w-full"
               type="range"
               min="0"
               max="100"
               aria-label="Playback position"
+              @pointerdown="beginSeek"
               @input="onSeek"
+              @change="commitSeek"
+              @pointerup="endSeek"
+              @pointercancel="endSeek"
+              @lostpointercapture="endSeek"
             />
           </div>
           <div class="mt-1.5 flex items-center justify-between font-mono text-xs tabular-nums text-white/60">

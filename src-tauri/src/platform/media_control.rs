@@ -320,30 +320,18 @@ pub fn media_control_take_control() -> Result<Option<String>, AppError> {
 }
 
 /// Artwork URL for desktop players.
+///
+/// `souvlaki` loads `file://` artwork itself (via `StorageFile` on Windows), so
+/// the cached cover JPEG can be served straight from disk on every desktop
+/// platform — no loopback HTTP proxy is needed.
 #[cfg(desktop)]
 fn desktop_cover_url(app: &AppHandle, payload: &MediaControlPayload) -> Option<String> {
     let hash = valid_hash(payload.cover_hash.as_deref())?;
-
-    #[cfg(target_os = "windows")]
-    {
-        // SMTC cannot read arbitrary `file://` URIs from an unpackaged app, so
-        // artwork is served through the loopback proxy that is already running.
-        use tauri::Manager;
-        let proxy = app.try_state::<crate::streaming::proxy::StreamProxy>()?;
-        Some(format!(
-            "http://127.0.0.1:{}/cover?token={}&hash={}",
-            proxy.port, proxy.token, hash
-        ))
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        let path = crate::commands::media::cover_path_for(
-            &crate::commands::media::resolve_cache_dir(app),
-            hash,
-        )?;
-        Some(format!("file://{path}"))
-    }
+    let path = crate::commands::media::cover_path_for(
+        &crate::commands::media::resolve_cache_dir(app),
+        hash,
+    )?;
+    Some(format!("file://{path}"))
 }
 
 /// Serialize the snapshot for the Android bridge, inlining the cover bytes.
