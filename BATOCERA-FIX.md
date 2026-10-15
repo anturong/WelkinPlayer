@@ -220,21 +220,32 @@ done
 
 ```
 Welkin个人复现版/
-├── README.md                          本文件
-├── Welkin_1.0.2_amd64-fixed.AppImage  自包含修复版（116.7 MB, sha256 688FCAB8…826ED）
-├── install-welkin.sh                  Batocera 侧安装/自检/卸载脚本
-├── install-welkin.ps1                 Windows 侧一键（上传+安装）
-├── welkin.sh                           Ports 启动脚本（安装脚本会生成同样的内容）
-├── payload/
-│   ├── welkin_gst/                     插件与支撑库（repack 用，约 3.5 MB）
-│   └── welkin_ffmpeg/                  libav 运行时闭包（repack 用，约 171 MB）
+├── README.md                              本文件
+├── Welkin_1.0.2_amd64-batocera.AppImage   ★ 可用版（116.7 MB, sha256 346952F8…A21F3）
+├── install-welkin.sh                      Batocera 侧安装/自检/卸载脚本
+├── install-welkin.ps1                     Windows 侧一键（上传+安装）
+├── welkin.sh                              Ports 启动脚本（安装脚本会生成同样的内容）
+├── patch/
+│   └── welkinplayer-1.0.2-patched         打过本地音源补丁的二进制（17.7 MB）
 └── build/
-    ├── repack-welkin.sh                在 Batocera 上重打包（解包→塞修复→mksquashfs）
-    └── fetch-payload.py                重新生成上面的 payload（从 jammy 镜像抓包 + ELF 闭包收敛）
+    ├── build-patched.sh                   一条命令复现补丁版（WSL/Ubuntu 22.04）
+    ├── swap-binary.sh                     把二进制替换进 AppImage 并重新拼装
+    ├── fix-local-stream-rewind.diff       上游修复补丁（对应 PR #1）
+    ├── repack-welkin.sh                   从原版重打包（需要 payload，见下）
+    └── fetch-payload.py                   重新生成 payload（从 jammy 镜像抓包 + ELF 闭包收敛）
 ```
 
-> payload 已经放进来了，所以**离线也能重打包**；如果 Ubuntu 镜像上下载更省事，
-> `python build/fetch-payload.py` 会重新生成它们（需要 `pip install zstandard`）。
+> **已精简**：为省空间，`payload/`（约 176 MB）与上一版 `-fixed` AppImage（116.7 MB）
+> 已从本目录移除，只在 Release 里留了备份 ——
+>
+> | 需要的东西 | 从哪里取 |
+> | --- | --- |
+> | `payload/`（重打包用） | Release [r1](https://github.com/anturong/WelkinPlayer/releases/tag/batocera-1.0.2-r1) 的 `welkin-payload.tar.zst`（68 MB，解压即得）；或跑 `python build/fetch-payload.py` |
+> | 上一版 `-fixed` AppImage | Release [r1](https://github.com/anturong/WelkinPlayer/releases/tag/batocera-1.0.2-r1)；`build-patched.sh` 的输入就是它 |
+> | 原始 `Welkin_1.0.2_amd64.AppImage` | 上游 [atemukesu/WelkinPlayer](https://github.com/atemukesu/WelkinPlayer/releases) 的 1.0.2 |
+>
+> 设备侧（`/userdata/system`）同样只保留了 `Welkin_1.0.2_amd64-batocera.AppImage`，
+> 原版与 `-fixed` 版已删除（释放约 230 MB）。
 
 ## 7. 环境备注（本机实测）
 
