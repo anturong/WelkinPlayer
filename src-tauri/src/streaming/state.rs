@@ -17,8 +17,9 @@ use crate::commands::media::asset_hash;
 use crate::data::sources::find_source;
 use crate::streaming::smart_cache::{SmartCache, SmartCandidate};
 use crate::streaming::stream_cache::{
-    read_smart_enabled, read_smart_limit_mb, read_stream_enabled, write_smart_enabled,
-    write_smart_limit_mb, write_stream_enabled, StreamCache, STREAM_BUDGET_MB,
+    read_lead_seconds, read_smart_enabled, read_smart_limit_mb, read_stream_enabled,
+    write_lead_seconds, write_smart_enabled, write_smart_limit_mb, write_stream_enabled,
+    StreamCache, STREAM_BUDGET_MB,
 };
 
 /// Cache tiers managed as Tauri state.
@@ -195,15 +196,18 @@ pub struct CacheConfig {
     pub smart_limit_mb: u64,
     /// Whether the read-ahead stream buffer is enabled.
     pub stream_enabled: bool,
+    /// Read-ahead pre-buffer window in seconds.
+    pub prefetch_seconds: u64,
 }
 
-/// Read the cache toggles and the smart-cache budget.
+/// Read the cache toggles, the smart-cache budget, and the pre-buffer window.
 #[tauri::command]
 pub fn get_cache_config(app: AppHandle) -> Result<CacheConfig, crate::core::error::AppError> {
     Ok(CacheConfig {
         smart_enabled: read_smart_enabled(&app),
         smart_limit_mb: read_smart_limit_mb(&app),
         stream_enabled: read_stream_enabled(&app),
+        prefetch_seconds: read_lead_seconds(&app),
     })
 }
 
@@ -241,6 +245,19 @@ pub fn set_stream_cache_enabled(
     write_stream_enabled(&app, enabled).map_err(crate::core::error::AppError::Store)?;
     state.cache.set_enabled(enabled);
     Ok(enabled)
+}
+
+/// Persist the read-ahead pre-buffer window (seconds) and apply it live. The
+/// value is clamped to its bounds by the store helper.
+#[tauri::command]
+pub fn set_prefetch_seconds(
+    state: tauri::State<StreamState>,
+    app: AppHandle,
+    seconds: u64,
+) -> Result<u64, crate::core::error::AppError> {
+    let seconds = write_lead_seconds(&app, seconds).map_err(crate::core::error::AppError::Store)?;
+    state.cache.set_lead_seconds(seconds);
+    Ok(seconds)
 }
 
 /// Drop the automatic caches (read-ahead buffer and non-pinned whole tracks);

@@ -54,6 +54,7 @@ const cacheDir = ref("");
 const smartLimit = ref(1024);
 const smartEnabled = ref(true);
 const streamEnabled = ref(true);
+const prefetchSeconds = ref(120);
 const smartBytes = ref(0);
 const smartLimitBytes = ref(1024 * 1024 * 1024);
 const streamBytes = ref(0);
@@ -76,6 +77,8 @@ async function refreshUsage() {
 }
 async function saveCacheDir() { try { cacheDir.value = await invoke<string>("set_cache_dir", { dir: cacheDir.value }); pushToast("success", t("settings.cache.saved")); } catch (error) { emit("friendlyError", error); } }
 async function saveCacheLimit() { try { smartLimit.value = await invoke<number>("set_smart_cache_limit", { limitMb: smartLimit.value }); pushToast("success", t("settings.cache.limitSaved")); void refreshUsage(); } catch (error) { emit("friendlyError", error); } }
+/** Persist the read-ahead pre-buffer window; the backend clamps it to 30-200s. */
+async function savePrefetchSeconds() { try { prefetchSeconds.value = await invoke<number>("set_prefetch_seconds", { seconds: prefetchSeconds.value }); pushToast("success", t("settings.cache.prefetchSaved")); } catch (error) { emit("friendlyError", error); } }
 /** Persist the smart-cache toggle; revert the switch if the backend rejects it. */
 async function toggleSmartEnabled() {
   const next = !smartEnabled.value;
@@ -158,11 +161,12 @@ async function checkUpdate() {
 }
 onMounted(() => {
   void invoke<string>("get_cache_dir").then((dir) => (cacheDir.value = dir)).catch(() => {});
-  void invoke<{ smartEnabled: boolean; smartLimitMb: number; streamEnabled: boolean }>("get_cache_config")
+  void invoke<{ smartEnabled: boolean; smartLimitMb: number; streamEnabled: boolean; prefetchSeconds: number }>("get_cache_config")
     .then((config) => {
       smartEnabled.value = config.smartEnabled;
       streamEnabled.value = config.streamEnabled;
       smartLimit.value = config.smartLimitMb;
+      prefetchSeconds.value = config.prefetchSeconds;
     })
     .catch(() => {});
   void refreshUsage();
@@ -409,6 +413,8 @@ button.text-dim:hover:not(:disabled) {
               <div class="flex items-baseline justify-between text-[11px] font-semibold uppercase tracking-[0.2em] text-dim"><span>{{ t("settings.cache.streamUsed") }}</span><span class="tabular-nums">{{ formatBytes(streamBytes) }} / {{ formatBytes(streamLimitBytes) }}</span></div>
               <span class="block h-2 w-full overflow-hidden bg-fg/10"><span class="block h-full bg-accent transition-[width]" :style="{ width: `${streamPercent}%` }"></span></span>
             </div>
+            <label class="grid gap-2 text-[13px] font-semibold uppercase tracking-[0.2em] text-dim">{{ t("settings.cache.prefetch") }}<input v-model.number="prefetchSeconds" type="number" min="30" max="200" step="10" class="h-10 border border-line bg-bg px-3 text-sm font-normal normal-case tracking-normal text-fg outline-none focus:border-accent" /><span class="text-[11px] font-normal normal-case tracking-normal text-dim">{{ t("settings.cache.prefetchDesc") }}</span></label>
+            <div class="flex justify-end"><button type="button" class="ak-clip-tr h-10 border border-line px-5 text-[13px] font-semibold uppercase tracking-[0.25em]" @click="savePrefetchSeconds">{{ t("settings.cache.prefetchSave") }}</button></div>
           </div>
 
           <div class="flex items-baseline justify-between text-[11px] font-semibold uppercase tracking-[0.2em] text-dim"><span>{{ t("settings.cache.pinned") }}</span><span class="tabular-nums">{{ formatBytes(cachePinned) }}</span></div>

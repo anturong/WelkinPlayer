@@ -36,8 +36,12 @@ use crate::commands::webdav::{enforce_url_policy, source_password};
 use crate::data::dav::resolve_under_base;
 use crate::data::sources::{SourceConfig, SETTINGS_FILE};
 
-/// Seconds of audio kept downloaded ahead of the playhead.
-pub const LEAD_SECONDS: f64 = 120.0;
+/// Default seconds of audio kept downloaded ahead of the playhead.
+pub const DEFAULT_LEAD_SECONDS: u64 = 120;
+/// Lower bound for the configurable pre-buffer window.
+pub const MIN_LEAD_SECONDS: u64 = 30;
+/// Upper bound for the configurable pre-buffer window.
+pub const MAX_LEAD_SECONDS: u64 = 200;
 /// Fallback bitrate when the track duration is still unknown (~320 kbps).
 const DEFAULT_BYTES_PER_SECOND: f64 = 40_000.0;
 const READ_CHUNK: usize = 64 * 1024;
@@ -48,6 +52,8 @@ pub const SMART_LIMIT_KEY: &str = "cache.smartLimitMb";
 pub const SMART_ENABLED_KEY: &str = "cache.smartEnabled";
 /// `settings.json` key toggling the read-ahead buffer used while streaming.
 pub const STREAM_ENABLED_KEY: &str = "cache.streamEnabled";
+/// `settings.json` key holding the read-ahead pre-buffer window in seconds.
+pub const LEAD_SECONDS_KEY: &str = "cache.leadSeconds";
 /// Legacy key from before the smart/stream split; read as a fallback only.
 const LEGACY_LIMIT_KEY: &str = "stream.cacheLimitMb";
 /// Default smart cache budget when the user has not chosen one.
@@ -87,7 +93,7 @@ struct EntryState {
     generation: u64,
     /// Last time the downloader made progress; detects hung upstream reads.
     last_advanced: Instant,
-    /// Overrides [`LEAD_SECONDS`] for this track (e.g. a short preload). Cleared
+    /// Overrides the cache's lead window for this track (e.g. a short preload). Cleared
     /// once the track is actually playing.
     lead_override: Option<f64>,
 }
@@ -141,6 +147,8 @@ pub struct StreamCache {
     order: Mutex<Vec<String>>,
     /// Track currently being played; never evicted mid-stream.
     active: Mutex<Option<String>>,
+    /// Seconds of audio kept downloaded ahead of the playhead (user configurable).
+    lead_seconds: AtomicU64,
 }
 
 impl StreamCache {
@@ -163,6 +171,7 @@ impl StreamCache {
             entries: Mutex::new(HashMap::new()),
             order: Mutex::new(Vec::new()),
             active: Mutex::new(None),
+            lead_seconds: AtomicU64::new(read_lead_seconds(app)),
         })
     }
 
@@ -175,6 +184,16 @@ impl StreamCache {
     /// [`StreamCache::clear`] reclaims them.
     pub fn set_enabled(&self, enabled: bool) {
         self.enabled.store(enabled, Ordering::Relaxed);
+    }
+
+    /// Configured seconds of audio kept downloaded ahead of the playhead.
+    pub fn lead_seconds(&self) -> f64 {
+        self.lead_seconds.load(Ordering::Relaxed) as f64
+    }
+
+    /// Update the read-ahead lead window in seconds.
+    pub fn set_lead_seconds(&self, seconds: u64) {
+        self.lead_seconds.store(seconds, Ordering::Relaxed);
     }
 
     /// Mark the track currently being played so it resists eviction.
@@ -304,7 +323,7 @@ impl StreamCache {
     }
 
     /// Begin prefetching a track without an active request (used for the next
-    /// queue entry). `lead` overrides [`LEAD_SECONDS`] for a short preload.
+    /// queue entry). `lead` overrides the configured lead window for a short preload.
     pub fn prefetch(
         self: &Arc<Self>,
         app: &AppHandle,
@@ -606,9 +625,9 @@ fn bytes_per_second(state: &EntryState) -> f64 {
     }
 }
 
-/// Effective lead window for a track (short override, else the default).
-fn lead_seconds(state: &EntryState) -> f64 {
-    state.lead_override.unwrap_or(LEAD_SECONDS)
+/// Effective lead window for a track (short override, else the cache default).
+fn lead_seconds(state: &EntryState, default: f64) -> f64 {
+    state.lead_override.unwrap_or(default)
 }
 
 fn spawn_downloader(
@@ -661,7 +680,7 @@ fn run_downloader(
                 return Ok(());
             }
             let bytes_per_second = bytes_per_second(&state);
-            let lead = (lead_seconds(&state) * bytes_per_second) as u64;
+            let lead = (lead_seconds(&state, cache.lead_seconds()) * bytes_per_second) as u64;
             let position = (state.position * bytes_per_second) as u64;
             let desired = position.saturating_add(lead);
             let target = state.total.map(|total| desired.min(total)).unwrap_or(desired);
@@ -722,7 +741,7 @@ fn run_downloader(
                 }
                 let bytes_per_second = bytes_per_second(&state);
                 let desired = ((state.position * bytes_per_second) as u64)
-                    .saturating_add((lead_seconds(&state) * bytes_per_second) as u64);
+                    .saturating_add((lead_seconds(&state, cache.lead_seconds()) * bytes_per_second) as u64);
                 state.total.map(|total| desired.min(total)).unwrap_or(desired)
             };
             if cursor >= target {
@@ -823,6 +842,26 @@ pub fn read_stream_enabled(app: &AppHandle) -> bool {
 /// Persist the stream buffer enabled flag.
 pub fn write_stream_enabled(app: &AppHandle, enabled: bool) -> Result<(), String> {
     write_bool(app, STREAM_ENABLED_KEY, enabled)
+}
+
+/// Read the configured read-ahead pre-buffer window (seconds), clamped to its
+/// bounds.
+pub fn read_lead_seconds(app: &AppHandle) -> u64 {
+    app.store(SETTINGS_FILE)
+        .ok()
+        .and_then(|store| store.get(LEAD_SECONDS_KEY))
+        .and_then(|value| value.as_u64())
+        .unwrap_or(DEFAULT_LEAD_SECONDS)
+        .clamp(MIN_LEAD_SECONDS, MAX_LEAD_SECONDS)
+}
+
+/// Persist the read-ahead pre-buffer window (seconds), clamped to its bounds.
+pub fn write_lead_seconds(app: &AppHandle, seconds: u64) -> Result<u64, String> {
+    let seconds = seconds.clamp(MIN_LEAD_SECONDS, MAX_LEAD_SECONDS);
+    let store = app.store(SETTINGS_FILE).map_err(|error| error.to_string())?;
+    store.set(LEAD_SECONDS_KEY, serde_json::json!(seconds));
+    store.save().map_err(|error| error.to_string())?;
+    Ok(seconds)
 }
 
 fn read_bool(app: &AppHandle, key: &str, fallback: bool) -> bool {

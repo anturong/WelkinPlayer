@@ -197,6 +197,7 @@ pub fn run() {
             streaming::state::set_smart_cache_limit,
             streaming::state::set_smart_cache_enabled,
             streaming::state::set_stream_cache_enabled,
+            streaming::state::set_prefetch_seconds,
             streaming::state::clear_cache,
             #[cfg(any(desktop, target_os = "android"))]
             playback::commands::audio_load,
