@@ -1,8 +1,8 @@
-﻿diff --git a/src-tauri/src/streaming/proxy.rs b/src-tauri/src/streaming/proxy.rs
-index bbd25ab..41dfc5f 100644
+diff --git a/src-tauri/src/streaming/proxy.rs b/src-tauri/src/streaming/proxy.rs
+index bbd25ab..6b48a79 100644
 --- a/src-tauri/src/streaming/proxy.rs
 +++ b/src-tauri/src/streaming/proxy.rs
-@@ -349,6 +349,11 @@ fn serve_cached_file(request: Request, file_path: &Path, remote_path: &str, rang
+@@ -349,14 +349,16 @@ fn serve_cached_file(request: Request, file_path: &Path, remote_path: &str, rang
          return;
      }
  
@@ -11,10 +11,22 @@ index bbd25ab..41dfc5f 100644
 +        let _ = request.respond(text(500, "seek failed"));
 +        return;
 +    }
++    // On a 32-bit target a file can exceed `usize`: advertise no fixed length and
++    // let tiny_http stream it chunked instead of truncating the body to 4 GiB.
++    let length = usize::try_from(total).ok();
      let reader = file.take(total);
-     let _ = request.respond(Response::new(
-         StatusCode(200),
-@@ -436,6 +441,12 @@ fn serve_local(request: Request, root: &Path, remote_path: &str, range: Option<&
+-    let _ = request.respond(Response::new(
+-        StatusCode(200),
+-        headers,
+-        reader,
+-        Some(total as usize),
+-        None,
+-    ));
++    let _ = request.respond(Response::new(StatusCode(200), headers, reader, length, None));
+ }
+ 
+ /// Extract the start offset of a `Range` header, ignoring suffix ranges.
+@@ -436,14 +438,17 @@ fn serve_local(request: Request, root: &Path, remote_path: &str, range: Option<&
              ));
          }
          None => {
@@ -24,6 +36,18 @@ index bbd25ab..41dfc5f 100644
 +                let _ = request.respond(text(500, "seek failed"));
 +                return;
 +            }
++            // Same 32-bit caveat as serve_cached_file: no fixed length when the
++            // file does not fit in `usize`, so the body is streamed chunked.
++            let length = usize::try_from(total).ok();
              let reader = file.take(total);
-             let _ = request.respond(Response::new(
-                 StatusCode(200),
+-            let _ = request.respond(Response::new(
+-                StatusCode(200),
+-                headers,
+-                reader,
+-                Some(total as usize),
+-                None,
+-            ));
++            let _ = request.respond(Response::new(StatusCode(200), headers, reader, length, None));
+         }
+     }
+ }

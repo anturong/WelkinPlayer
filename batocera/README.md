@@ -346,6 +346,7 @@ match range.and_then(|v| parse_range(v, total)) {
 
 - 内容 = 上游 main + 上述修复，重新编译 `welkinplayer`，替换进 `-fixed` 版 AppImage
 - sha256 `346952F8911FF7DAB792F3F75BCD2900A48D225D65A3CBDD9ABFBBA711FA21F3`
+- **同源说明**：预编译产物基于修复提交 `88363cf`；分支 HEAD（`1ed2e21`）另含一项 32 位 >4 GiB 的加固（`usize::try_from(total).ok()`，超出 `usize` 时改走 chunked），**64 位行为完全一致**。要完全同源就用 `build/build-patched.sh` 重新编译。
 - 实测：MP3 / FLAC / WMA 三首点播放均有声，pipewire 里出现 `welkinplayer` 的流 `[active]`，进度正常推进，日志中 `Can't typefind` 0 次
 
 ### 复现构建
