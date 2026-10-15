@@ -1,21 +1,9 @@
 # Welkin on Batocera — 个人复现版
 
----
+**一句话**：把 **`Welkin_1.0.2_amd64-batocera.AppImage`** 拷到 Batocera 的 `/userdata/system/`，再放一个启动脚本，Ports 菜单就能放出声音。
 
-## 0. 已发布的成品
-
-| 内容 | 地址 |
-| --- | --- |
-| 分支 | https://github.com/anturong/WelkinPlayer/tree/batocera |
-| Release（成品 AppImage + payload） | https://github.com/anturong/WelkinPlayer/releases/tag/batocera-1.0.2-r1 |
-
-Release 资产：
-
-- `Welkin_1.0.2_amd64-fixed.AppImage` — 116.7 MB，sha256 `688FCAB8561C0BE7EA6C30263500D15FDD07C9127BF59A399F6E1470345826ED`
-  （自包含修复版，拷到 `/userdata/system/` 配 8 行启动脚本即可）
-- `welkin-payload.tar.zst` — 68.2 MB，sha256 `C79A87248AB7A4764ECD28A9F0CC03444739A03C2CD6B882B65B53BC5368260B`
-  （解压得到 `payload/`，配合 `build/repack-welkin.sh` 可对任意 Welkin AppImage 重新打包）
-**一句话**：把 `Welkin_1.0.2_amd64-fixed.AppImage` 拷到 Batocera 的 `/userdata/system/`，再放一个启动脚本，Ports 菜单就能放出声音。
+> `-batocera` 版 = 原版重打包（补齐 GStreamer 插件与解码器）**+ 修掉本地音源代理的上游 bug**，是当前唯一「点播放真的有声音」的版本。
+> 上一版 `-fixed` 只解决了打包问题，本地音源仍会被上游 bug 卡住（详见文末「本地音源修复」）。
 
 ---
 
@@ -247,18 +235,8 @@ Welkin个人复现版/
 | 目标系统 | Batocera.linux 43.1，kernel 6.18.16，glibc 2.40，Mesa 25.3.6 |
 | 系统 GStreamer | 1.26.6（89 个插件） |
 | AppImage 自带 | GStreamer 1.20.3 + GLib 2.72 时代 |
-| 音乐位置 | `/media/sda3/roms/music/`（sda3 是 NTFS，被 mergerfs 并进 `/userdata/roms`） |
-| 虚拟机 | VMware Workstation，NAT 网段 192.168.17.0/24 |
-
----
-
-## 8. 许可与第三方组件
-
-- 本仓库（fork 自 [atemukesu/WelkinPlayer](https://github.com/atemukesu/WelkinPlayer)）遵循上游的 **GPL-3.0**，
-  本目录下的脚本与文档同样按 GPL-3.0 分发。
-- 修复版 AppImage 内额外打包的 GStreamer 插件与 FFmpeg/libav 运行时来自 **Ubuntu 22.04 (jammy)** 官方软件包，
-  对应组件分别为 **LGPL-2.1+/GPL** 许可；重新分发时请保留其许可与来源说明（可用 `build/fetch-payload.py` 复核来源）。
-- 本套件只做「打包与运行时适配」，未修改 WelkinPlayer 的任何源代码。
+| 音乐位置 | `/userdata/roms/music/`（稳定路径）；物理上是 sda3 那块 NTFS，由 Batocera 用 mergerfs 并进来。**注意盘符会漂移，别用 `/media/sdX3/...` 写进 Welkin 的库路径**，见末尾「常见问题」 |
+| 虚拟机 | VMware Workstation，NAT 网段 192.168.17.0/24（本机为硬件直通，等同实机） |
 
 ---
 
@@ -314,3 +292,72 @@ env -i DISPLAY=:0.0 HOME=/userdata/system PATH=/usr/bin:/bin XDG_RUNTIME_DIR=/va
 - 白屏：`WEBKIT_DISABLE_DMABUF_RENDERER=1` 没生效（修复版已内嵌；若被别的脚本覆盖请检查 AppRun 钩子）
 - 卡死：`WebKitWebProcess` 崩了 —— 先看 `/userdata/system/logs/welkin-app.log` 里的 `not found` / `plugin loader` 关键字
 - 快速判断白屏：抓屏文件大小，白屏约 8~12 KB，正常界面 >200 KB
+
+---
+
+## 本地音源修复（上游 bug，需自编译补丁版）
+
+> 解决的现象：**用本地文件夹当音源时，点播放没声音、进度停在 `0:00`**。
+> 早期 `-fixed` 版也有这个问题 —— 它不是打包问题，而是**上游代码的 bug**。
+
+### 症状与定位
+
+WebKit 发出的媒体请求**首包不带 `Range`**，直接打向 app 自己的本地代理：
+
+| 请求 | 上游代理的响应 |
+| --- | --- |
+| `GET /stream?...`（无 Range） | **200 + 0 字节** ← 致命 |
+| `GET /stream?...` + `Range: bytes=0-` | 206 + 完整文件（`Content-Range: bytes 0-…/…`） |
+| `GET /stream?...` + `Range: bytes=0-99` | 206 + 100 字节 |
+
+于是 GStreamer 报 `typefind: Stream doesn't contain enough data` / `Can't typefind stream`，
+播放静默失败。注意 `serve_webdav()` 只是把请求转发给上游 HTTP 服务器，
+所以**用 WebDAV 音源不受影响** —— 这是当时判断"问题在代理而不在音频栈"的关键证据。
+
+### 根因
+
+`src-tauri/src/streaming/proxy.rs`：
+
+```rust
+let total = file.seek(SeekFrom::End(0))?;   // 取长度，游标停在 EOF
+match range.and_then(|v| parse_range(v, total)) {
+    Some((start, end)) => { file.seek(SeekFrom::Start(start))?; /* 206 */ }  // ✓ 有 Range 会回绕
+    None => { let reader = file.take(total); /* 200 */ }                    // ✗ 无 Range 就从 EOF 读 → 0 字节
+}
+```
+
+`serve_local()` 与 `serve_cached_file()`（智能缓存命中）两处都有这个问题。
+已向上游提交 PR：<https://github.com/atemukesu/WelkinPlayer/pull/1>
+
+### 补丁版
+
+本套件里的 **`Welkin_1.0.2_amd64-batocera.AppImage`**（116.7 MB）：
+
+- 内容 = 上游 main + 上述修复，重新编译 `welkinplayer`，替换进 `-fixed` 版 AppImage
+- sha256 `346952F8911FF7DAB792F3F75BCD2900A48D225D65A3CBDD9ABFBBA711FA21F3`
+- 实测：MP3 / FLAC / WMA 三首点播放均有声，pipewire 里出现 `welkinplayer` 的流 `[active]`，进度正常推进，日志中 `Can't typefind` 0 次
+
+### 复现构建
+
+```bash
+# WSL / Ubuntu 22.04（与 AppImage 的 jammy 基准同源），一条命令走完依赖+编译+替换
+bash build/build-patched.sh /path/to/Welkin_1.0.2_amd64-fixed.AppImage
+```
+
+脚本里注释了两个实际踩到的坑：
+
+1. **cargo 源**：清华的 sparse index 里 `dl` 仍指向 `static.crates.io`，在国内会**卡死 30 分钟不动**；
+   要用 index 与 `dl` 同源的镜像（脚本用 `rsproxy.cn`）。
+2. **必须用 tauri CLI 构建**：裸 `cargo build --release` **不会把前端资源嵌进二进制** →
+   启动后白屏（`grep -a -c "index-CCoJszDh" 二进制` 为 0 可判定）。脚本用
+   `node_modules/.bin/tauri build --no-bundle`，并用资源指纹自检。
+
+若已有编译好的二进制，也可以只做替换：
+
+```bash
+scp patch/welkinplayer-1.0.2-patched root@<batocera>:/tmp/
+scp build/swap-binary.sh            root@<batocera>:/tmp/
+ssh root@<batocera> 'bash /tmp/swap-binary.sh /tmp/welkinplayer-1.0.2-patched \
+     /userdata/system/Welkin_1.0.2_amd64-fixed.AppImage \
+     /userdata/system/Welkin_1.0.2_amd64-batocera.AppImage'
+```

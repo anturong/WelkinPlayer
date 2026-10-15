@@ -3,9 +3,9 @@
 #  Welkin (修复版 AppImage) -> Batocera  安装 / 自检 / 卸载
 #
 #  在 Batocera 上以 root 执行:
-#      bash install-welkin.sh [选项] [/path/to/Welkin*-fixed.AppImage]
+#      bash install-welkin.sh [选项] [/path/to/Welkin_1.0.2_amd64-batocera.AppImage]
 #
-#  不给路径时自动找 /userdata/system/Welkin*.AppImage（优先 -fixed）
+#  不给路径时自动找 /userdata/system/Welkin*.AppImage（优先 -batocera，其次 -fixed）
 #
 #  选项:
 #      --verify        装完起一个实例自检（进程 / 截图 / 音频链路）
@@ -63,11 +63,12 @@ resolve_appimage() {
     if [ -n "$APPIMAGE" ]; then
         [ -f "$APPIMAGE" ] || { c_err "找不到文件: $APPIMAGE"; exit 1; }
     else
-        APPIMAGE=$(ls -1t "$TARGET_DIR"/Welkin*-fixed.AppImage 2>/dev/null | head -1)
+        APPIMAGE=$(ls -1t "$TARGET_DIR"/Welkin*-batocera.AppImage 2>/dev/null | head -1)
+        [ -n "$APPIMAGE" ] || APPIMAGE=$(ls -1t "$TARGET_DIR"/Welkin*-fixed.AppImage 2>/dev/null | head -1)
         [ -n "$APPIMAGE" ] || APPIMAGE=$(ls -1t "$TARGET_DIR"/Welkin*.AppImage 2>/dev/null | head -1)
         if [ -z "$APPIMAGE" ]; then
             c_err "没找到 AppImage。请先上传，例如:"
-            c_err "  scp Welkin_1.0.2_amd64-fixed.AppImage root@<batocera>:/userdata/system/"
+            c_err "  scp Welkin_1.0.2_amd64-batocera.AppImage root@<batocera>:/userdata/system/"
             exit 1
         fi
     fi
@@ -187,8 +188,9 @@ do_install() {
         c_warn "读不到 AppImage 运行时信息"
     fi
     case "$base" in
-        *-fixed*) info "OK    这是修复版（插件/环境已内嵌）" ;;
-        *) c_warn "这不是 -fixed 修复版；原版在 Batocera 上一播放就会崩（见 README 第 1 节）" ;;
+        *-batocera*) c_ok "OK    这是 batocera 修复版（插件/环境内置 + 本地音源代理补丁）" ;;
+        *-fixed*)    c_warn "这是早期修复版：插件/环境没问题，但本地音源命中上游 bug 会没声音（见 README「本地音源修复」）" ;;
+        *) c_warn "这不是修复版；原版在 Batocera 上一播放就会崩（见 README 第 1 节）" ;;
     esac
 
     step "生成 Ports 启动脚本"

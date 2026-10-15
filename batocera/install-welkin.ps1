@@ -8,7 +8,7 @@
     非交互登录使用 OpenSSH for Windows 的 SSH_ASKPASS 机制（临时文件，退出即删）。
 
 .EXAMPLE
-    # 最常用：把同目录的 fixed AppImage 装上去，自检 + 重启 ES
+    # 最常用：把同目录的 batocera 修复版 AppImage 装上去，自检 + 重启 ES
     powershell -ExecutionPolicy Bypass -File .\install-welkin.ps1 -Verify -Restart
 
 .EXAMPLE
@@ -65,7 +65,8 @@ if (-not $Uninstall) {
         $cand = Get-ChildItem -LiteralPath $PSScriptRoot -Filter 'Welkin*.AppImage' -File -ErrorAction SilentlyContinue |
                 Sort-Object LastWriteTime -Descending
         if ($cand.Count -gt 0) {
-            $AppImage = ($cand | Where-Object { $_.Name -like '*-fixed*' } | Select-Object -First 1).FullName
+            $AppImage = ($cand | Where-Object { $_.Name -like '*-batocera*' } | Select-Object -First 1).FullName
+            if (-not $AppImage) { $AppImage = ($cand | Where-Object { $_.Name -like '*-fixed*' } | Select-Object -First 1).FullName }
             if (-not $AppImage) { $AppImage = $cand[0].FullName }
             Say "自动选中: $AppImage"
         } else {
@@ -77,8 +78,8 @@ if (-not $Uninstall) {
     Say ("AppImage : {0}" -f $AppImage)
     Say ("           {0:N1} MB  sha256 {1}" -f ((Get-Item -LiteralPath $AppImage).Length / 1MB),
                                                (Get-FileHash -LiteralPath $AppImage -Algorithm SHA256).Hash.Substring(0,16))
-    if ($appName -notlike '*-fixed*') {
-        Warn "注意：这不是 -fixed 修复版。原版在 Batocera 上一按播放就会让 WebKit 渲染进程崩掉（详见 README）。"
+    if ($appName -notlike '*-batocera*') {
+        Warn "注意：这不是 batocera 修复版。若文件名带 -fixed，则插件已修好但本地音源会命中上游 bug 而没声音；若是原版，一按播放就会让 WebKit 渲染进程崩掉（详见 README）。"
     }
 }
 
