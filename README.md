@@ -1,3 +1,38 @@
+> [!IMPORTANT]
+> ## ⚡ 开箱可用的 Batocera / Linux 修复版（本 fork 提供）
+>
+> 上游 `Welkin_1.0.2_amd64.AppImage` 在 Linux 上**放不出声音**，有两个独立原因，本 fork 都已修掉：
+>
+> 1. **打包缺陷**（原版问题）：包内只有 GStreamer 1.20.3 **核心库、零插件**，还把插件目录指向包内
+>    **不存在**的路径 → WebKit 造不出 `autoaudiosink` → 一播放音频 `WebKitWebProcess` 立即崩溃
+>    （表现为播放器卡死 / 白屏）。→ 重新打包，补齐 GStreamer 插件与 FFmpeg 解码器，全部内嵌进 AppImage。
+> 2. **上游代码 bug**（[PR #1](https://github.com/atemukesu/WelkinPlayer/pull/1)）：本地音源经 app 自带的流代理
+>    播放，而该代理在**无 `Range` 请求**时忘了把文件游标回绕到 0（`serve_local()` / `serve_cached_file()`），
+>    于是返回 `200` + **0 字节** → GStreamer 报 `Can't typefind stream` → 点播放静默无声
+>    （WebDAV 音源走转发路径，不受影响）。
+>
+> **下载（已实测出声）**
+> 👉 [**`Welkin_1.0.2_amd64-batocera.AppImage`**](https://github.com/anturong/WelkinPlayer/releases/tag/batocera-1.0.2-r2)
+> 　sha256 `346952f8911ff7dab792f3f75bcd2900a48d225d65a3cbdd9abfbba711fa21f3`
+>
+> ```bash
+> scp Welkin_1.0.2_amd64-batocera.AppImage root@<batocera>:/userdata/system/
+> scp welkin.sh root@<batocera>:/userdata/roms/ports/     # 见 batocera 分支，或跑 install-welkin.sh 自动生成
+> ```
+>
+> **实测环境**：Batocera.linux 43.1 / kernel 6.18 / x86_64 / PipeWire。MP3、FLAC、WMA 三首点播放均有声，
+> `wpctl status` 里可见 `welkinplayer` 的流 `[active]`，进度正常推进，日志中 `Can't typefind` 计数为 0。
+>
+> **更多**
+> - 完整说明（症状 / 根因代码 / 复现构建 / 踩坑）→ [BATOCERA-FIX.md](BATOCERA-FIX.md) 与 [`batocera` 分支](https://github.com/anturong/WelkinPlayer/tree/batocera)
+> - 本地音源修复补丁本身 → [fix-local-stream-rewind.diff](https://github.com/anturong/WelkinPlayer/releases/download/batocera-1.0.2-r2/fix-local-stream-rewind.diff)
+> - 重新编译补丁版（WSL/Ubuntu 22.04 一条命令）→ [build-patched.sh](https://github.com/anturong/WelkinPlayer/releases/download/batocera-1.0.2-r2/build-patched.sh)
+>
+> > 注：AppImage 为 116.7 MB，超过 GitHub **单文件 100 MB** 限制，无法放进 git 仓库，因此只作为
+> > [Release 资产](https://github.com/anturong/WelkinPlayer/releases/tag/batocera-1.0.2-r2) 提供。
+>
+> ---
+
 ![Welkin banner](docs/assets/banner.svg)
 
 **[中文](README.md) · [English](README.en.md)**
