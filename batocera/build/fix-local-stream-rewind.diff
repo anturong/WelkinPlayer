@@ -1,0 +1,29 @@
+﻿diff --git a/src-tauri/src/streaming/proxy.rs b/src-tauri/src/streaming/proxy.rs
+index bbd25ab..41dfc5f 100644
+--- a/src-tauri/src/streaming/proxy.rs
++++ b/src-tauri/src/streaming/proxy.rs
+@@ -349,6 +349,11 @@ fn serve_cached_file(request: Request, file_path: &Path, remote_path: &str, rang
+         return;
+     }
+ 
++    // Same as serve_local: rewind after seek(End(0)) before streaming the body.
++    if file.seek(SeekFrom::Start(0)).is_err() {
++        let _ = request.respond(text(500, "seek failed"));
++        return;
++    }
+     let reader = file.take(total);
+     let _ = request.respond(Response::new(
+         StatusCode(200),
+@@ -436,6 +441,12 @@ fn serve_local(request: Request, root: &Path, remote_path: &str, range: Option<&
+             ));
+         }
+         None => {
++            // Rewind to the beginning: `total` came from seek(End(0)), which left
++            // the cursor at EOF, so without this the body would be empty.
++            if file.seek(SeekFrom::Start(0)).is_err() {
++                let _ = request.respond(text(500, "seek failed"));
++                return;
++            }
+             let reader = file.take(total);
+             let _ = request.respond(Response::new(
+                 StatusCode(200),
