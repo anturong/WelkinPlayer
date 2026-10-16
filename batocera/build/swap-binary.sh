@@ -9,9 +9,12 @@
 ###############################################################################
 set -eu
 
-NEWBIN="${1:?用法: swap-binary.sh <新二进制> <原AppImage> [输出AppImage]}"
-SRC="${2:?缺少原 AppImage}"
-OUT="${3:-$(dirname "$SRC")/$(basename "${SRC%.AppImage}")-patched.AppImage}"
+# 参数先绝对化：脚本内部会 cd 到临时目录，相对路径到那时就失效了
+ORIG_PWD="$(pwd)"
+abs() { case "$1" in /*) printf '%s' "$1" ;; *) printf '%s/%s' "$ORIG_PWD" "$1" ;; esac; }
+NEWBIN="$(abs "${1:?用法: swap-binary.sh <新二进制> <原AppImage> [输出AppImage]}")"
+SRC="$(abs "${2:?缺少原 AppImage}")"
+OUT="$(abs "${3:-$(dirname "$SRC")/$(basename "${SRC%.AppImage}")-patched.AppImage}")"
 
 [ -f "$NEWBIN" ] || { echo "找不到新二进制: $NEWBIN" >&2; exit 1; }
 [ -f "$SRC" ]    || { echo "找不到 AppImage: $SRC" >&2; exit 1; }
