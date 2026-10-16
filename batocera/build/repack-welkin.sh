@@ -46,7 +46,9 @@ cd "$WORK"
 echo "== 1/6 解包原版 =="
 # 不用 mv：某些环境里 mv 会"成功"但目标不出现（Batocera 上实测过），改用 cp -a 更稳
 rm -rf squashfs-root appdir
-"$SRC" --appimage-extract > /dev/null 2>&1
+[ -x "$SRC" ] || chmod +x "$SRC" 2>/dev/null || true
+[ -x "$SRC" ] || { echo "$SRC 不可执行（AppImage 需要 +x）" >&2; exit 1; }
+"$SRC" --appimage-extract > /dev/null   # 保留 stderr：解包失败时要看得到原因
 sync
 for _ in 1 2 3 4 5; do
     [ -f squashfs-root/usr/bin/welkinplayer ] && break
