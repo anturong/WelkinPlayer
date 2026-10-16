@@ -1,24 +1,6 @@
-diff --git a/src-tauri/src/lib.rs b/src-tauri/src/lib.rs
-index aa82bd6..72d322c 100644
---- a/src-tauri/src/lib.rs
-+++ b/src-tauri/src/lib.rs
-@@ -198,7 +198,10 @@ pub fn run() {
-             platform::media_control::media_control_position,
-             platform::media_control::media_control_clear,
-             platform::media_control::media_control_take_control,
--            platform::tray::set_close_to_tray
-+            platform::tray::set_close_to_tray,
-+            platform::tray::esc_quit_enabled,
-+            #[cfg(desktop)]
-+            platform::tray::quit_application
-         ])
-         .run(tauri::generate_context!())
-         .expect("error while running tauri application");
-diff --git a/src-tauri/src/platform/tray.rs b/src-tauri/src/platform/tray.rs
-index 77db273..d72dddf 100644
 --- a/src-tauri/src/platform/tray.rs
 +++ b/src-tauri/src/platform/tray.rs
-@@ -51,6 +51,25 @@ fn quit_app(app: &AppHandle) {
+@@ -51,6 +51,25 @@
      app.exit(0);
  }
  
@@ -44,18 +26,29 @@ index 77db273..d72dddf 100644
  /// Create the tray icon and its context menu.
  #[cfg(desktop)]
  pub fn init(app: &tauri::App) -> tauri::Result<()> {
-diff --git a/src/App.vue b/src/App.vue
-index 7143cc1..073c7cf 100644
+--- a/src-tauri/src/lib.rs
++++ b/src-tauri/src/lib.rs
+@@ -227,7 +227,10 @@
+             platform::media_control::media_control_position,
+             platform::media_control::media_control_clear,
+             platform::media_control::media_control_take_control,
+-            platform::tray::set_close_to_tray
++            platform::tray::set_close_to_tray,
++            platform::tray::esc_quit_enabled,
++            #[cfg(desktop)]
++            platform::tray::quit_application
+         ])
+         .run(tauri::generate_context!())
+         .expect("error while running tauri application");
 --- a/src/App.vue
 +++ b/src/App.vue
-@@ -313,7 +313,30 @@ async function downloadMetadata(track: Track) {
+@@ -313,7 +313,29 @@
  function toggleSidebar() { sidebarCollapsed.value = !sidebarCollapsed.value; localStorage.setItem("welkin-sidebar-collapsed", sidebarCollapsed.value ? "1" : "0"); }
  /** Re-verify the Pro license from scratch whenever the app regains focus. */
  function recheckLicense() { void license.refresh(); }
 +/**
 + * Escape quits on kiosk builds: the Batocera port launcher sets WELKIN_ESC_QUITS=1
-+ * so the player returns to EmulationStation like any other emulator. Desktop
-+ * builds leave the flag unset and keep their keyboard behaviour.
++ * so the player returns to EmulationStation like any other emulator.
 + */
 +let escQuits = false;
 +async function loadEscQuit() {
@@ -79,7 +72,7 @@ index 7143cc1..073c7cf 100644
    if (event.code !== "Space" && event.key !== " ") return;
    const target = event.target as HTMLElement | null;
    if (!target) return;
-@@ -325,7 +348,7 @@ function onGlobalKeydown(event: KeyboardEvent) {
+@@ -325,7 +347,7 @@
    player.togglePlayback();
  }
  
