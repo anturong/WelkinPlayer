@@ -1,6 +1,7 @@
 #!/bin/bash
 # Welkin - Batocera Ports launcher
-# 直接使用自包含修复版 AppImage：GStreamer 插件 / libav / 环境修正都在包内
+# 自包含 AppImage：环境修正（去 libdbus、WebKit 软件路径、XDG_RUNTIME_DIR）已写进包内
+# 新版播放由 rodio/symphonia 在 Rust 里解码，不需要 GStreamer 插件
 export DISPLAY=:0.0
 export XDG_RUNTIME_DIR=/var/run
 # Batocera 习惯：Escape 退出回 EmulationStation（桌面版不受影响）
