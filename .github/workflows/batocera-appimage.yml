@@ -118,7 +118,8 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             squashfs-tools file pkg-config patchelf \
             libgtk-3-dev libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev \
-            libsoup-3.0-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev
+            libsoup-3.0-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev \
+            libasound2-dev libxdo-dev     # cpal/alsa-sys 与 tauri 的 xdo 需要（debug 单测也会编到）
 
       - uses: actions/setup-node@v4
         with:
