@@ -44,8 +44,21 @@ trap 'rm -rf "$WORK"' EXIT
 cd "$WORK"
 
 echo "== 1/6 解包原版 =="
+# 不用 mv：某些环境里 mv 会"成功"但目标不出现（Batocera 上实测过），改用 cp -a 更稳
+rm -rf squashfs-root appdir
 "$SRC" --appimage-extract > /dev/null 2>&1
-mv squashfs-root appdir
+sync
+for _ in 1 2 3 4 5; do
+    [ -f squashfs-root/usr/bin/welkinplayer ] && break
+    sleep 2
+done
+[ -f squashfs-root/usr/bin/welkinplayer ] || { echo "解包失败：找不到 squashfs-root/usr/bin/welkinplayer" >&2; exit 1; }
+mkdir -p appdir
+cp -a squashfs-root/. appdir/
+rm -rf squashfs-root
+[ -f appdir/usr/bin/welkinplayer ] || { echo "复制 AppDir 失败" >&2; exit 1; }
+mkdir -p appdir/apprun-hooks
+echo "   AppDir 就绪（$(du -sh appdir | cut -f1)）"
 
 if [ "$HAVE_PAYLOAD" = 1 ]; then
     echo "== 2/6 放入 GStreamer 插件与扫描器 =="
@@ -89,9 +102,8 @@ echo "== 4/6 移除自带的 libdbus（它会打崩系统 dbus-launch）=="
 rm -f appdir/usr/lib/libdbus-1.so.3
 echo "   已移除"
 
-echo "== 5/6 写入 Batocera 适配（追加到会被 source 的 gtk 钩子）=="
-cat >> appdir/apprun-hooks/linuxdeploy-plugin-gtk.sh <<'HOOKEOF'
-
+echo "== 5/6 写入 Batocera 适配（自带钩子 + 追加到上游 gtk 钩子）=="
+HOOK_BODY='
 # --- Batocera adaptation, appended during repack ---
 # 无 3D 加速（VM／没有 render node）时 WebKit 必须走软件路径，否则白屏。
 # 真机有可用 GPU 时，在启动器里设 WELKIN_GL_ACCEL=1 即可恢复硬件合成。
@@ -111,27 +123,33 @@ fi
 if [ -z "${XDG_RUNTIME_DIR:-}" ] || [ ! -d "${XDG_RUNTIME_DIR:-}" ]; then
     export XDG_RUNTIME_DIR=/var/run
 fi
-HOOKEOF
+'
 
-# AppRun 只按名字 source 那一个 gtk 钩子，这里额外挂上自己的钩子做双保险
-cat > appdir/apprun-hooks/zz-welkin-fix.sh <<'HOOKEOF'
-#! /bin/bash
-: "${APPDIR:=$(dirname "$(realpath "$0")")}"
-if [ "${WELKIN_GL_ACCEL:-0}" != "1" ]; then
-    export WEBKIT_DISABLE_DMABUF_RENDERER=1
-    export WEBKIT_DISABLE_COMPOSITING_MODE=1
+# 上游的 gtk 钩子（AppRun 会按名字 source 它）——有就追加，没有就跳过
+GTK_HOOK=appdir/apprun-hooks/linuxdeploy-plugin-gtk.sh
+if [ -f "$GTK_HOOK" ]; then
+    printf '%s\n' "$HOOK_BODY" >> "$GTK_HOOK"
+    echo "   已追加到 linuxdeploy-plugin-gtk.sh"
+else
+    echo "   上游没有 gtk 钩子（AppImage 布局不同），只用自己的钩子"
 fi
-if [ -d "$APPDIR/usr/lib/gstreamer-1.0" ]; then
-    export GST_PLUGIN_SCANNER="$APPDIR/usr/lib/gstreamer-1.0/gst-plugin-scanner"
-    export GST_PLUGIN_FEATURE_RANK="mpg123audiodec:MAX"
-fi
-if [ -z "${XDG_RUNTIME_DIR:-}" ] || [ ! -d "${XDG_RUNTIME_DIR:-}" ]; then
-    export XDG_RUNTIME_DIR=/var/run
-fi
-HOOKEOF
+
+# 自己的钩子：不依赖上游布局
+printf '#! /bin/bash\n%s\n' "$HOOK_BODY" > appdir/apprun-hooks/zz-welkin-fix.sh
 chmod 755 appdir/apprun-hooks/zz-welkin-fix.sh
-grep -q zz-welkin-fix appdir/AppRun || \
-    sed -i 's|^exec "$this_dir"/AppRun.wrapped|source "$this_dir"/apprun-hooks/"zz-welkin-fix.sh"\nexec "$this_dir"/AppRun.wrapped|' appdir/AppRun
+
+# 让 AppRun 一定 source 到我们的钩子
+if ! grep -q 'zz-welkin-fix' appdir/AppRun; then
+    if grep -q '^exec "$this_dir"/AppRun.wrapped' appdir/AppRun; then
+        sed -i 's|^exec "$this_dir"/AppRun.wrapped|source "$this_dir"/apprun-hooks/"zz-welkin-fix.sh"\nexec "$this_dir"/AppRun.wrapped|' appdir/AppRun
+        echo "   已在 AppRun 的 exec 前插入 source"
+    else
+        # AppRun 结构未知时的兜底：插到 shebang 之后
+        sed -i '1a source "$(dirname "$(readlink -f "$0")")/apprun-hooks/zz-welkin-fix.sh"' appdir/AppRun
+        echo "   已在 AppRun 顶部插入 source（兜底路径）"
+    fi
+fi
+grep -n 'zz-welkin-fix' appdir/AppRun | sed 's/^/   /'
 
 echo "== 6/6 重新拼装 AppImage =="
 OFF=$("$SRC" --appimage-offset)
