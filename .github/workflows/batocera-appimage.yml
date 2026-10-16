@@ -213,7 +213,7 @@ jobs:
         run: |
           set -euo pipefail
           tag="batocera-${VER}-r${REV}"
-          gh release create "$tag" \
+          gh release create "$tag" -R "$GITHUB_REPOSITORY" \
             --title "Batocera 可用版 ${VER}-r${REV}（Escape 退出 + 全屏可视化）" \
             --notes-file notes.md \
             "Welkin_${VER}_amd64-batocera.AppImage" \
@@ -224,4 +224,4 @@ jobs:
             kit/batocera/patches/0002-escape-quit.diff \
             kit/batocera/patches/0003-audio-visualizer.diff \
             kit/batocera/README.md
-          gh release view "$tag"
+          gh release view "$tag" -R "$GITHUB_REPOSITORY"
