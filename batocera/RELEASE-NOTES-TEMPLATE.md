@@ -1,5 +1,8 @@
 # Batocera 可用版 {{VERSION}}
 
+- AppImage 取自上游 release：`{{TAG}}`
+- 二进制与补丁基于上游源码 ref：`{{REF}}`（v1.0.2 的 tag 是旧模块结构，补丁针对 main）
+
 上游 `{{TAG}}` 的 AppImage 在 Linux / Batocera 上**放不出声音**，原因有两个独立问题，本构建都已修掉：
 
 ## 1. 打包缺陷（上游 AppImage 本身）
