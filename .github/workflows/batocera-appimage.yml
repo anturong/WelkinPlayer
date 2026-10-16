@@ -131,7 +131,12 @@ jobs:
           workspaces: upstream/src-tauri
 
       - name: 下载上游 AppImage（外壳）
-        run: curl -fL --retry 3 -o upstream.AppImage "${{ needs.resolve.outputs.appimage_url }}"
+        run: |
+          set -euo pipefail
+          curl -fL --retry 3 -o upstream.AppImage "${{ needs.resolve.outputs.appimage_url }}"
+          chmod +x upstream.AppImage          # AppImage 是 ELF，没可执行位跑不起来
+          ls -lh upstream.AppImage
+          ./upstream.AppImage --appimage-version
 
       - name: 打补丁（Escape 退出 + 全屏可视化）
         working-directory: upstream
