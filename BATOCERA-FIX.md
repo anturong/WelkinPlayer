@@ -1,3 +1,96 @@
+# Batocera 上的 Welkin
+
+> **本文档最新一次更新：`batocera-1.0.2-r3`（2026-10-16）。**
+> 下面「最新状态」是当前做法。再往后的章节是 r1/r2 时期的记录（包括当时为**旧架构**准备的
+> GStreamer/libav payload 方案）——保留作为过程记录，**现在都已经不需要了**。
+
+---
+
+## 最新状态（r3）
+
+**产物**：<https://github.com/anturong/WelkinPlayer/releases/tag/batocera-1.0.2-r3>
+
+| 文件 | 说明 |
+| --- | --- |
+| `Welkin_1.0.2_amd64-batocera.AppImage` | 86.1 MB，sha256 `beb5c4e0d420f611203be7e10819de87015d448cbc7badc0b0904d7703e4de94` |
+| `welkinplayer-1.0.2-patched` | 打过补丁的二进制（想换进别的 AppImage 时用） |
+| `repack-welkin.sh` / `swap-binary.sh` / `build-patched.sh` | 复现脚本 |
+| `0002-escape-quit.diff` / `0003-audio-visualizer.diff` | 两个补丁 |
+
+- **外壳**：上游 release `v1.0.2` 里的 amd64 AppImage（带它自带的 WebKit/GTK 栈）
+- **二进制**：上游源码 ref `0c50d2bddd81289e1705642a97e82da6ef220bbf`（main 新架构）+ 两个补丁
+- 比 r2 小了 30 MB：新版播放由 **rodio + symphonia 在 Rust 里解码**，不经过 webview 的
+  GStreamer，所以**不需要**任何插件/libav 闭包了
+
+### 两个补丁
+
+| 补丁 | 内容 |
+| --- | --- |
+| `0002-escape-quit.diff` | Escape 退出。由环境变量开关（`WELKIN_ESC_QUITS=1`），桌面版完全不受影响 |
+| `0003-audio-visualizer.diff` | Rust 侧频谱分析 + 全屏可视化（镜像 / 柱状 / 环形三种样式） |
+
+### CI（`.github/workflows/batocera-appimage.yml`，跑在本 fork）
+
+```
+解析上游最新 release（或手动指定 tag）
+  → 取本仓库 batocera 分支（脚本 + 补丁）
+  → 取上游源码（默认钉在 0c50d2b…，补丁失配会明确报错）
+  → 依次 git apply batocera/patches/*.diff
+  → pnpm build + cargo test --lib + tauri build --no-bundle
+  → 校验二进制里前端资源已嵌入 + 补丁痕迹存在（esc_quit_enabled / audio_spectrum_config / audio:spectrum）
+  → repack-welkin.sh（无 payload）+ swap-binary.sh 换入新二进制
+  → 发 Release 并附上 AppImage / 二进制 / 脚本 / 补丁
+```
+
+每小时定时检查一次上游 release；同一版本已构建过会跳过，`force` 勾选则递增修订号（r2、r3…）。
+
+### 实测结果（Batocera 43.1，VMware 虚拟机，**无 3D 加速**）
+
+用 CI 产出的 r3 原包实测：
+
+- 启动正常，播放正常（`pw-cli` 可见 `Stream/Output/Audio`，ALSA 有 underrun 属正常）
+- 全屏可视化：`[visualizer] mirror 16–18 fps, 72 bands, canvas 1920x1080, layer 1920x1080`
+- 连拍两帧 SSIM ≈ 0.92（画面确实在动）
+- Escape 分层正确：第一次只退全屏（进程仍在），第二次才退出程序
+- 三种样式（镜像 / 柱状 / 环形）均可用
+
+真机有 3D 加速时帧率会明显更高；把启动器里的 `WELKIN_GL_ACCEL=1` 打开即可走硬件合成。
+
+### 安装
+
+```sh
+scp Welkin_1.0.2_amd64-batocera.AppImage root@<batocera>:/userdata/system/
+# 用仓库里的 batocera/welkin.sh 覆盖 /userdata/roms/ports/welkin.sh（已含 WELKIN_ESC_QUITS=1）
+chmod 755 /userdata/roms/ports/welkin.sh
+```
+
+### 踩过的坑（搭这条流水线时全踩了一遍）
+
+1. 还在打包 GStreamer/libav payload —— 新架构根本不需要（rodio 自带解码），而且 CI 里闭包抓不全
+2. 发布步骤引用了未定义的 `REV` —— `set -u` 下必然失败
+3. 资产列表里列着已归档的 `0001` —— `gh release create` 找不到文件，必失败
+4. `cargo test` 没给 `--manifest-path` —— `Cargo.toml` 在 `src-tauri/` 下
+5. 缺 `libasound2-dev` —— `alsa-sys` 的 build script 过不了；**debug 单测才暴露**（release 侧一直被 rust-cache 挡着）
+6. `repack-welkin.sh` 假定上游有 `linuxdeploy-plugin-gtk.sh` —— 换个 AppImage 布局就崩
+7. **Batocera 上 `mv` 会静默失效**（返回成功但目标不出现）—— 改用 `cp -a` + 落盘重试
+8. 脚本内部 `cd` 到临时目录后才用相对路径 —— 参数必须在入口绝对化
+9. `curl` 下载的 AppImage 没有可执行位 —— 必须 `chmod +x`（AppImage 是 ELF）
+
+另外修掉了：两个脚本的编码乱码、`build-patched.sh` 还在 clone 已废弃分支、CI 里 `gh` 推断不出仓库
+（工作区根目录不是 git 仓库）、发布说明过时。
+
+---
+
+### 相关文件
+
+- `.github/workflows/batocera-appimage.yml` —— 流水线
+- `batocera/patches/*.diff` —— 补丁（按文件名顺序应用）
+- `batocera/build/repack-welkin.sh` —— 把 Batocera 适配写进 AppImage（去 libdbus、WebKit 软件路径、XDG_RUNTIME_DIR）
+- `batocera/build/swap-binary.sh` —— 换入新二进制
+- `batocera/build/build-patched.sh` —— 本地兜底构建（WSL/Ubuntu，CI 不可用时用）
+- `batocera/welkin.sh` —— 启动器模板
+- `batocera/install-welkin.sh` / `.ps1` —— 安装脚本
+
 # Welkin on Batocera — 修复说明与复现（本 fork）
 
 > 本文件是 [batocera 分支](https://github.com/anturong/WelkinPlayer/tree/batocera) 文档的镜像，
