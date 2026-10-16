@@ -3,6 +3,8 @@
 # 直接使用自包含修复版 AppImage：GStreamer 插件 / libav / 环境修正都在包内
 export DISPLAY=:0.0
 export XDG_RUNTIME_DIR=/var/run
+# Batocera 习惯：Escape 退出回 EmulationStation（桌面版不受影响）
+export WELKIN_ESC_QUITS=1
 
 pkill -f welkinplayer 2>/dev/null
 sleep 1

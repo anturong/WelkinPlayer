@@ -1,0 +1,94 @@
+diff --git a/src-tauri/src/lib.rs b/src-tauri/src/lib.rs
+index aa82bd6..72d322c 100644
+--- a/src-tauri/src/lib.rs
++++ b/src-tauri/src/lib.rs
+@@ -198,7 +198,10 @@ pub fn run() {
+             platform::media_control::media_control_position,
+             platform::media_control::media_control_clear,
+             platform::media_control::media_control_take_control,
+-            platform::tray::set_close_to_tray
++            platform::tray::set_close_to_tray,
++            platform::tray::esc_quit_enabled,
++            #[cfg(desktop)]
++            platform::tray::quit_application
+         ])
+         .run(tauri::generate_context!())
+         .expect("error while running tauri application");
+diff --git a/src-tauri/src/platform/tray.rs b/src-tauri/src/platform/tray.rs
+index 77db273..d72dddf 100644
+--- a/src-tauri/src/platform/tray.rs
++++ b/src-tauri/src/platform/tray.rs
+@@ -51,6 +51,25 @@ fn quit_app(app: &AppHandle) {
+     app.exit(0);
+ }
+ 
++/// Quit the whole application from the frontend. The Batocera port launcher maps
++/// Escape to this so the player exits back to EmulationStation.
++#[cfg(desktop)]
++#[tauri::command]
++pub fn quit_application(app: AppHandle) {
++    quit_app(&app);
++}
++
++/// Whether Escape should quit the app. Opt-in through the environment so packaged
++/// desktop builds keep their current keyboard behaviour; the Batocera launcher
++/// sets `WELKIN_ESC_QUITS=1`.
++#[tauri::command]
++pub fn esc_quit_enabled() -> bool {
++    matches!(
++        std::env::var("WELKIN_ESC_QUITS").as_deref(),
++        Ok("1") | Ok("true") | Ok("yes")
++    )
++}
++
+ /// Create the tray icon and its context menu.
+ #[cfg(desktop)]
+ pub fn init(app: &tauri::App) -> tauri::Result<()> {
+diff --git a/src/App.vue b/src/App.vue
+index 7143cc1..0760189 100644
+--- a/src/App.vue
++++ b/src/App.vue
+@@ -313,7 +313,31 @@ async function downloadMetadata(track: Track) {
+ function toggleSidebar() { sidebarCollapsed.value = !sidebarCollapsed.value; localStorage.setItem("welkin-sidebar-collapsed", sidebarCollapsed.value ? "1" : "0"); }
+ /** Re-verify the Pro license from scratch whenever the app regains focus. */
+ function recheckLicense() { void license.refresh(); }
++/**
++ * Escape quits on kiosk builds: the Batocera port launcher sets WELKIN_ESC_QUITS=1
++ * so the player returns to EmulationStation like any other emulator. Desktop
++ * builds leave the flag unset and keep their current keyboard behaviour.
++ */
++let escQuits = false;
++async function loadEscQuit() {
++  try {
++    escQuits = await invoke<boolean>("esc_quit_enabled");
++  } catch (error) {
++    console.warn("[welkin] esc-quit probe failed", describeError(error));
++  }
++}
++
+ function onGlobalKeydown(event: KeyboardEvent) {
++  if (escQuits && event.key === "Escape") {
++    // 输入框里的 Escape 交给控件自己处理，别把播放器关掉
++    const escapeTarget = event.target as HTMLElement | null;
++    if (escapeTarget) {
++      const tag = escapeTarget.tagName.toLowerCase();
++      if (escapeTarget.isContentEditable || tag === "input" || tag === "textarea" || tag === "select") return;
++    }
++    void invoke("quit_application").catch((error) => console.warn("[welkin] quit failed", describeError(error)));
++    return;
++  }
+   if (event.code !== "Space" && event.key !== " ") return;
+   const target = event.target as HTMLElement | null;
+   if (!target) return;
+@@ -325,7 +349,7 @@ function onGlobalKeydown(event: KeyboardEvent) {
+   player.togglePlayback();
+ }
+ 
+-onMounted(() => { windowBehavior.sync(); window.addEventListener("hashchange", syncViewFromHash); window.addEventListener("keydown", onGlobalKeydown); window.addEventListener("beforeunload", savePlaybackPositionOnLeave); window.addEventListener("pagehide", savePlaybackPositionOnLeave); window.addEventListener("focus", recheckLicense); document.addEventListener("visibilitychange", onVisibilityChange); void initAudio(); void network.start(); void cache.start(); bootDesktopLyrics(); bootMediaControl(); void invoke<string>("ping").catch((error) => console.warn("[welkin] ping failed", describeError(error))); void bootstrap(); });
++onMounted(() => { void loadEscQuit(); windowBehavior.sync(); window.addEventListener("hashchange", syncViewFromHash); window.addEventListener("keydown", onGlobalKeydown); window.addEventListener("beforeunload", savePlaybackPositionOnLeave); window.addEventListener("pagehide", savePlaybackPositionOnLeave); window.addEventListener("focus", recheckLicense); document.addEventListener("visibilitychange", onVisibilityChange); void initAudio(); void network.start(); void cache.start(); bootDesktopLyrics(); bootMediaControl(); void invoke<string>("ping").catch((error) => console.warn("[welkin] ping failed", describeError(error))); void bootstrap(); });
+ onUnmounted(() => { savePlaybackPosition(true); stopDesktopLyrics(); stopMediaControl(); window.removeEventListener("hashchange", syncViewFromHash); window.removeEventListener("keydown", onGlobalKeydown); window.removeEventListener("beforeunload", savePlaybackPositionOnLeave); window.removeEventListener("pagehide", savePlaybackPositionOnLeave); window.removeEventListener("focus", recheckLicense); document.removeEventListener("visibilitychange", onVisibilityChange); void profile.flush(); });
+ </script>
+ 
+warning: in the working copy of 'src-tauri/src/lib.rs', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src-tauri/src/platform/tray.rs', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/App.vue', LF will be replaced by CRLF the next time Git touches it
