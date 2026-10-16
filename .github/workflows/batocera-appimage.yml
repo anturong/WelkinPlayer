@@ -1,0 +1,201 @@
+name: Build Batocera AppImage
+
+# 上游发新版本后自动产出「可用的 Batocera AppImage」并发 Release，不需要人工介入。
+#
+# 触发方式：
+#   - 手动：Actions -> Build Batocera AppImage -> Run workflow（可指定上游 tag、可强制重建）
+#   - 定时：每天检查一次上游 release，有新版就自动构建
+#   - 打 rebuild-* tag 触发
+#
+# 产物 = 上游 AppImage（含其自带 WebKit/GTK 栈）
+#        + GStreamer/libav 闭包（解决"零插件→一播放就崩"）
+#        + 上游源码打补丁后重编的 welkinplayer（解决"本地音源无声"，以及 Escape 退出）
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: '上游 tag（留空 = 取最新 release，例如 v1.0.2）'
+        required: false
+        default: ''
+      force:
+        description: '该版本已构建过也强制重建'
+        type: boolean
+        default: false
+  schedule:
+    - cron: '23 4 * * *'
+  push:
+    tags:
+      - 'rebuild-*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: batocera-appimage
+  cancel-in-progress: false
+
+env:
+  UPSTREAM: atemukesu/WelkinPlayer
+
+jobs:
+  # ---------------------------------------------------------------- 解析版本 / 判断是否需要构建
+  resolve:
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.pick.outputs.version }}
+      tag: ${{ steps.pick.outputs.tag }}
+      appimage_url: ${{ steps.pick.outputs.appimage_url }}
+      skip: ${{ steps.pick.outputs.skip }}
+    steps:
+      - id: pick
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WANT: ${{ inputs.upstream_tag }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+          tag="${WANT:-}"
+          if [ -z "$tag" ]; then
+            tag=$(gh api "repos/${UPSTREAM}/releases/latest" --jq .tag_name)
+          fi
+          version="${tag#v}"
+          echo "上游 tag: $tag    版本: $version"
+          url=$(gh api "repos/${UPSTREAM}/releases/tags/${tag}" \
+                --jq '.assets[] | select(.name | test("amd64.*\\.AppImage$")) | .browser_download_url' | head -1)
+          [ -n "$url" ] || { echo "::error::在 $tag 里找不到 amd64 AppImage 资产"; exit 1; }
+          echo "AppImage: $url"
+          skip=false
+          if [ "$FORCE" != "true" ] && gh release view "batocera-${version}-r1" >/dev/null 2>&1; then
+            echo "已存在 release batocera-${version}-r1，跳过构建"
+            skip=true
+          fi
+          {
+            echo "tag=$tag"
+            echo "version=$version"
+            echo "appimage_url=$url"
+            echo "skip=$skip"
+          } >> "$GITHUB_OUTPUT"
+
+  # ---------------------------------------------------------------- 构建
+  build:
+    needs: resolve
+    if: needs.resolve.outputs.skip != 'true'
+    runs-on: ubuntu-22.04        # 与 AppImage 的 jammy 基准同源，glibc 比 Batocera 旧
+    steps:
+      - name: 取本仓库（脚本与补丁）
+        uses: actions/checkout@v4
+        with:
+          ref: batocera
+          path: kit
+
+      - name: 取上游源码（目标 tag）
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.UPSTREAM }}
+          ref: ${{ needs.resolve.outputs.tag }}
+          path: upstream
+
+      - name: 系统依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            squashfs-tools python3-pip file pkg-config patchelf \
+            libgtk-3-dev libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev \
+            libsoup-3.0-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev
+          pip3 install --quiet zstandard
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: corepack enable && corepack prepare pnpm@9 --activate
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: upstream/src-tauri
+
+      - name: 下载上游 AppImage
+        run: curl -fL --retry 3 -o upstream.AppImage "${{ needs.resolve.outputs.appimage_url }}"
+
+      - name: 打补丁（本地音源修复 + Escape 退出）
+        working-directory: upstream
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for p in ../kit/batocera/patches/*.diff; do
+            echo "== 应用 $p"
+            git apply --verbose "$p" || {
+              echo "::error::补丁 $p 无法应用到 ${{ needs.resolve.outputs.tag }}，需要先更新补丁"
+              exit 1
+            }
+          done
+
+      - name: 构建前端 + 二进制
+        working-directory: upstream
+        run: |
+          set -euo pipefail
+          pnpm install --frozen-lockfile
+          pnpm build
+          # 必须走 tauri CLI：裸 cargo build 不会把前端资源嵌进二进制（启动会白屏）
+          node_modules/.bin/tauri build --no-bundle
+
+      - name: 校验前端已嵌入
+        working-directory: upstream
+        run: |
+          bin=src-tauri/target/release/welkinplayer
+          ls -lh "$bin"
+          for pat in desktop-lyric-overlay index.html; do
+            n=$(grep -a -c "$pat" "$bin" || true)
+            echo "$pat -> $n"
+            [ "$n" -ge 1 ] || { echo "::error::前端资源没有嵌入二进制"; exit 1; }
+          done
+
+      - name: 生成 GStreamer / libav payload
+        working-directory: kit
+        run: python3 batocera/build/fetch-payload.py --out "$PWD/payload"
+
+      - name: 重打包成自包含 AppImage 并换入新二进制
+        env:
+          VER: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          bash kit/batocera/build/repack-welkin.sh upstream.AppImage kit/payload fixed.AppImage
+          bash kit/batocera/build/swap-binary.sh \
+            upstream/src-tauri/target/release/welkinplayer \
+            fixed.AppImage \
+            "Welkin_${VER}_amd64-batocera.AppImage"
+          ls -lh *.AppImage
+          sha256sum *.AppImage | tee sha256.txt
+          tar -I 'zstd -19 -T0' -cf welkin-payload.tar.zst -C kit payload
+          cp upstream/src-tauri/target/release/welkinplayer welkinplayer-${VER}-patched
+
+      - name: 生成 Release 说明
+        env:
+          VER: ${{ needs.resolve.outputs.version }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+        run: |
+          set -euo pipefail
+          sha=$(awk '{print $1}' sha256.txt | head -1)
+          sed -e "s|{{VERSION}}|${VER}|g" -e "s|{{TAG}}|${TAG}|g" -e "s|{{SHA256}}|${sha}|g" \
+              kit/batocera/RELEASE-NOTES-TEMPLATE.md > notes.md
+          cat notes.md
+
+      - name: 创建 Release 并上传资产
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VER: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          tag="batocera-${VER}-r1"
+          gh release create "$tag" \
+            --title "Batocera 可用版 ${VER}（含本地音源修复 + Escape 退出）" \
+            --notes-file notes.md \
+            "Welkin_${VER}_amd64-batocera.AppImage" \
+            "welkinplayer-${VER}-patched" \
+            welkin-payload.tar.zst \
+            kit/batocera/build/build-patched.sh \
+            kit/batocera/build/swap-binary.sh \
+            kit/batocera/patches/0001-streaming-rewind.diff \
+            kit/batocera/patches/0002-escape-quit.diff \
+            kit/batocera/README.md
+          gh release view "$tag"

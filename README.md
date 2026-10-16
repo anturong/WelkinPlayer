@@ -12,7 +12,7 @@
 >    （WebDAV 音源走转发路径，不受影响）。
 >
 > **下载（已实测出声）**
-> 👉 [**`Welkin_1.0.2_amd64-batocera.AppImage`**](https://github.com/anturong/WelkinPlayer/releases/tag/batocera-1.0.2-r2)
+> 👉 [**`Welkin_1.0.2_amd64-batocera.AppImage`**](https://github.com/anturong/WelkinPlayer/releases/latest)
 > 　sha256 `346952f8911ff7dab792f3f75bcd2900a48d225d65a3cbdd9abfbba711fa21f3`
 >
 > ```bash
@@ -23,13 +23,16 @@
 > **实测环境**：Batocera.linux 43.1 / kernel 6.18 / x86_64 / PipeWire。MP3、FLAC、WMA 三首点播放均有声，
 > `wpctl status` 里可见 `welkinplayer` 的流 `[active]`，进度正常推进，日志中 `Can't typefind` 计数为 0。
 >
+> **自动构建**：上游发新版后由 GitHub Actions 自动重打包并发 Release（见 `.github/workflows/batocera-appimage.yml`），
+> 无需人工介入。
+>
 > **更多**
 > - 完整说明（症状 / 根因代码 / 复现构建 / 踩坑）→ [BATOCERA-FIX.md](BATOCERA-FIX.md) 与 [`batocera` 分支](https://github.com/anturong/WelkinPlayer/tree/batocera)
-> - 本地音源修复补丁本身 → [fix-local-stream-rewind.diff](https://github.com/anturong/WelkinPlayer/releases/download/batocera-1.0.2-r2/fix-local-stream-rewind.diff)
-> - 重新编译补丁版（WSL/Ubuntu 22.04 一条命令）→ [build-patched.sh](https://github.com/anturong/WelkinPlayer/releases/download/batocera-1.0.2-r2/build-patched.sh)
+> - 本地音源修复补丁本身 → [fix-local-stream-rewind.diff](https://github.com/anturong/WelkinPlayer/releases/latest/download/fix-local-stream-rewind.diff)
+> - 重新编译补丁版（WSL/Ubuntu 22.04 一条命令）→ [build-patched.sh](https://github.com/anturong/WelkinPlayer/releases/latest/download/build-patched.sh)
 >
 > > 注：AppImage 为 116.7 MB，超过 GitHub **单文件 100 MB** 限制，无法放进 git 仓库，因此只作为
-> > [Release 资产](https://github.com/anturong/WelkinPlayer/releases/tag/batocera-1.0.2-r2) 提供。
+> > [Release 资产](https://github.com/anturong/WelkinPlayer/releases/latest) 提供。
 >
 > ---
 
