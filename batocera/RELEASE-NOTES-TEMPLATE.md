@@ -35,7 +35,6 @@
 | --- | --- | --- |
 | `Welkin_{{VERSION}}_amd64-batocera.AppImage` | **直接用这个**：自包含，插件/补丁全部内置 | `{{SHA256}}` |
 | `welkinplayer-{{VERSION}}-patched` | 打过补丁的 `welkinplayer` 二进制 | 见 Release 内 `sha256` 输出 |
-| `welkin-payload.tar.zst` | GStreamer + libav 闭包（重新打包用） | — |
 | `0001-streaming-rewind.diff` / `0002-escape-quit.diff` | 两个补丁本身 | — |
 | `build-patched.sh` / `swap-binary.sh` | 本地复现构建 / 二进制替换 | — |
 
