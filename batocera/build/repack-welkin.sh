@@ -18,9 +18,12 @@
 ###############################################################################
 set -eu
 
-SRC="${1:?用法: repack-welkin.sh <原始AppImage> [payload目录|-] [输出路径]}"
+# 参数先绝对化：脚本内部会 cd 到临时目录，相对路径到那时就失效了
+ORIG_PWD="$(pwd)"
+abs() { case "$1" in /*) printf '%s' "$1" ;; *) printf '%s/%s' "$ORIG_PWD" "$1" ;; esac; }
+SRC="$(abs "${1:?用法: repack-welkin.sh <原始AppImage> [payload目录|-] [输出路径]}")"
 PAYLOAD="${2:--}"
-OUT="${3:-$(dirname "$SRC")/$(basename "${SRC%.AppImage}")-fixed.AppImage}"
+OUT="$(abs "${3:-$(dirname "$SRC")/$(basename "${SRC%.AppImage}")-fixed.AppImage}")"
 
 # 这些是「GStreamer 插件」，必须放进 usr/lib/gstreamer-1.0/（仅旧架构需要）
 PLUGINS="libgstcoreelements.so libgstplayback.so libgsttypefindfunctions.so \
