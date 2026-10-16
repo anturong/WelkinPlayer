@@ -151,7 +151,7 @@ jobs:
           set -euo pipefail
           pnpm install --frozen-lockfile
           pnpm build                       # 必须先建前端：lib 里的 generate_context! 会读 dist
-          cargo test --lib --quiet         # 频谱分析等单测（4 个频谱用例）
+          cargo test --manifest-path src-tauri/Cargo.toml --lib --quiet   # 频谱等单测
           # 必须走 tauri CLI：裸 cargo build 不会把前端资源嵌进二进制（启动会白屏）
           node_modules/.bin/tauri build --no-bundle
 
