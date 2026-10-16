@@ -1,0 +1,1163 @@
+diff --git a/src-tauri/src/lib.rs b/src-tauri/src/lib.rs
+index 3390e71..3d228b0 100644
+--- a/src-tauri/src/lib.rs
++++ b/src-tauri/src/lib.rs
+@@ -215,6 +215,8 @@ pub fn run() {
+             playback::commands::audio_stop,
+             #[cfg(any(desktop, target_os = "android"))]
+             playback::commands::audio_state,
++            #[cfg(any(desktop, target_os = "android"))]
++            playback::commands::audio_spectrum_config,
+             commands::desktop_lyric::desktop_lyric_open,
+             commands::desktop_lyric::desktop_lyric_close,
+             commands::desktop_lyric::desktop_lyric_load,
+diff --git a/src-tauri/src/playback/commands.rs b/src-tauri/src/playback/commands.rs
+index a5be7da..f341b3b 100644
+--- a/src-tauri/src/playback/commands.rs
++++ b/src-tauri/src/playback/commands.rs
+@@ -60,3 +60,25 @@ pub fn audio_stop(engine: State<Engine>) -> Result<(), AppError> {
+ pub fn audio_state(engine: State<Engine>) -> AudioState {
+     engine.shared().snapshot()
+ }
++
++/// Turn the spectrum analyser on/off and size it for the visualiser.
++///
++/// Analysis only runs while a visualiser is on screen, so this is what keeps a
++/// closed full-screen player free of the extra per-sample work.
++#[tauri::command]
++pub fn audio_spectrum_config(
++    engine: State<Engine>,
++    enabled: bool,
++    bands: Option<usize>,
++    fps: Option<u32>,
++) {
++    let shared = engine.shared();
++    let spectrum = &shared.spectrum;
++    spectrum.set_enabled(enabled);
++    if let Some(bands) = bands {
++        spectrum.set_bands(bands);
++    }
++    if let Some(fps) = fps {
++        spectrum.set_fps(fps);
++    }
++}
+diff --git a/src-tauri/src/playback/engine.rs b/src-tauri/src/playback/engine.rs
+index b408992..262948f 100644
+--- a/src-tauri/src/playback/engine.rs
++++ b/src-tauri/src/playback/engine.rs
+@@ -26,6 +26,7 @@ use tauri::{AppHandle, Emitter};
+ 
+ use crate::core::error::AppError;
+ use crate::playback::source::{open_track, ReadSeek};
++use crate::playback::spectrum::Spectrum;
+ use crate::streaming::smart_cache::SmartCache;
+ use crate::streaming::stream_cache::StreamCache;
+ 
+@@ -75,6 +76,9 @@ pub struct Shared {
+     failure: Mutex<Option<ErrorInfo>>,
+     /// `(source_id, path)` of the loaded track, for cache progress reporting.
+     location: Mutex<Option<(String, String)>>,
++    /// Sample tap for the visualiser. Fed by the decode worker, read by its own
++    /// emitter thread; the audio callback never touches it.
++    pub spectrum: Arc<Spectrum>,
+ }
+ 
+ impl Shared {
+@@ -93,6 +97,7 @@ impl Shared {
+             ended: AtomicBool::new(false),
+             failure: Mutex::new(None),
+             location: Mutex::new(None),
++            spectrum: Arc::new(Spectrum::new()),
+         }
+     }
+ 
+@@ -303,6 +308,7 @@ impl Engine {
+ pub fn start(app: AppHandle, cache: Arc<StreamCache>, smart: Arc<SmartCache>) -> Engine {
+     let (tx, rx) = mpsc::channel();
+     let shared = Arc::new(Shared::new());
++    let app_handle = app.clone();
+ 
+     let worker_shared = shared.clone();
+     let worker_app = app.clone();
+@@ -311,6 +317,11 @@ pub fn start(app: AppHandle, cache: Arc<StreamCache>, smart: Arc<SmartCache>) ->
+     let events_shared = shared.clone();
+     std::thread::spawn(move || events::run(app, events_shared));
+ 
++    // The visualiser needs frames far faster than the 250 ms state tick, and only
++    // while one is subscribed, so it gets a thread of its own.
++    let spectrum_shared = shared.clone();
++    std::thread::spawn(move || events::run_spectrum(app_handle, spectrum_shared));
++
+     Engine { tx, shared }
+ }
+ 
+@@ -351,6 +362,26 @@ mod events {
+             }
+         }
+     }
++
++    /// Offer analyser frames while a visualiser is subscribed.
++    ///
++    /// Idle — no analysis, no allocation, no IPC — whenever nothing is on screen,
++    /// so keeping the full-screen player closed costs nothing.
++    pub fn run_spectrum(app: AppHandle, shared: Arc<Shared>) {
++        let mut last_seq = 0u64;
++        loop {
++            let spectrum = &shared.spectrum;
++            let fps = spectrum.fps().max(1) as u64;
++            std::thread::sleep(Duration::from_millis(1000 / fps));
++            if !spectrum.is_enabled() {
++                continue;
++            }
++            if let Some(frame) = spectrum.frame_if_new(last_seq) {
++                last_seq = frame.seq;
++                let _ = app.emit("audio:spectrum", frame);
++            }
++        }
++    }
+ }
+ 
+ mod worker {
+@@ -707,6 +738,15 @@ mod worker {
+                 return;
+             }
+             let pushed = ring.push_slice(&current.pending[current.pending_offset..]);
++            // Visualiser tap: the same samples, on this worker thread, after they
++            // were offered to the ring, so analysis can never delay audio.
++            if pushed > 0 {
++                shared.spectrum.push(
++                    &current.pending[current.pending_offset..current.pending_offset + pushed],
++                    shared.channels.load(Ordering::Relaxed),
++                    shared.sample_rate.load(Ordering::Relaxed),
++                );
++            }
+             current.pending_offset += pushed;
+             if current.source_done && current.pending_offset >= current.pending.len() {
+                 ring.done.store(true, Ordering::Relaxed);
+diff --git a/src-tauri/src/playback/mod.rs b/src-tauri/src/playback/mod.rs
+index 95e3e98..6364898 100644
+--- a/src-tauri/src/playback/mod.rs
++++ b/src-tauri/src/playback/mod.rs
+@@ -18,3 +18,4 @@
+ pub mod commands;
+ pub mod engine;
+ pub mod source;
++pub mod spectrum;
+diff --git a/src-tauri/src/playback/spectrum.rs b/src-tauri/src/playback/spectrum.rs
+new file mode 100644
+index 0000000..2fb788a
+--- /dev/null
++++ b/src-tauri/src/playback/spectrum.rs
+@@ -0,0 +1,365 @@
++// Copyright 2026 Atemukesu
++// SPDX-License-Identifier: GPL-3.0-only
++
++//! Spectrum analysis for the full-screen visualiser.
++//!
++//! `Worker::pump` hands every decoded sample to [`Spectrum::push`] *after* the
++//! samples have been offered to the ring buffer, on the decode worker thread, so
++//! the analysis can never delay audio: the realtime callback only ever touches
++//! the ring.
++//!
++//! A 2048-sample window is filled at the file's native rate, mono-downmixed,
++//! Hann-windowed and transformed with a small iterative radix-2 FFT. The bins are
++//! folded into logarithmically spaced bands (so bass does not dominate the
++//! picture), converted to decibels and smoothed with a fast attack / slow release
++//! — that asymmetry is what makes a bar graph look like it follows the music
++//! instead of flickering with it.
++//!
++//! Nothing here polls the frontend: `events::run_spectrum` emits `audio:spectrum`
++//! whenever a fresh frame exists, and only while a visualiser is subscribed.
++
++use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
++use std::sync::Mutex;
++
++use serde::Serialize;
++
++/// Samples analysed per frame (power of two).
++const WINDOW: usize = 2048;
++/// Lowest and highest band edge, in hertz.
++const LOW_HZ: f32 = 40.0;
++const HIGH_HZ: f32 = 16_000.0;
++/// Magnitude range mapped onto 0..1, in decibels.
++const FLOOR_DB: f32 = -78.0;
++const CEIL_DB: f32 = -8.0;
++/// Per-frame smoothing: quick rise, slow fall.
++const ATTACK: f32 = 0.6;
++const RELEASE: f32 = 0.14;
++/// Band-count limits accepted from the frontend.
++const MIN_BANDS: usize = 8;
++const MAX_BANDS: usize = 256;
++/// Emitter cadence limits, in frames per second.
++pub const MIN_FPS: u32 = 5;
++pub const MAX_FPS: u32 = 60;
++
++/// One analysis frame, pushed to the frontend on `audio:spectrum`.
++#[derive(Clone, Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct SpectrumFrame {
++    /// Monotonic counter; lets the emitter skip frames nothing consumed.
++    pub seq: u64,
++    /// Band magnitudes, `0..=255`, low frequencies first.
++    pub bands: Vec<u8>,
++}
++
++struct Inner {
++    /// Rolling time-domain window, filled sample by sample.
++    window: Vec<f32>,
++    position: usize,
++    /// Scratch buffers, kept across frames so analysis never allocates.
++    re: Vec<f32>,
++    im: Vec<f32>,
++    /// Smoothed band levels, `0.0..=1.0`.
++    levels: Vec<f32>,
++    frame: SpectrumFrame,
++    sample_rate: u32,
++    channels: u32,
++    /// Set when the format changes, so a stale window is not analysed.
++    stale: bool,
++}
++
++/// Lock-light holder for the analyser state.
++pub struct Spectrum {
++    inner: Mutex<Inner>,
++    enabled: AtomicBool,
++    bands: AtomicU32,
++    fps: AtomicU32,
++    seq: AtomicU64,
++}
++
++impl Default for Spectrum {
++    fn default() -> Self {
++        Self::new()
++    }
++}
++
++impl Spectrum {
++    pub fn new() -> Self {
++        Self {
++            inner: Mutex::new(Inner {
++                window: vec![0.0; WINDOW],
++                position: 0,
++                re: vec![0.0; WINDOW],
++                im: vec![0.0; WINDOW],
++                levels: vec![0.0; 64],
++                frame: SpectrumFrame { seq: 0, bands: Vec::new() },
++                sample_rate: 44_100,
++                channels: 2,
++                stale: true,
++            }),
++            enabled: AtomicBool::new(false),
++            bands: AtomicU32::new(64),
++            fps: AtomicU32::new(30),
++            seq: AtomicU64::new(0),
++        }
++    }
++
++    /// The frontend subscribes while a visualiser is on screen.
++    pub fn set_enabled(&self, on: bool) {
++        self.enabled.store(on, Ordering::Relaxed);
++        if !on {
++            let mut inner = self.inner.lock().unwrap();
++            inner.position = 0;
++            inner.stale = true;
++            for level in inner.levels.iter_mut() {
++                *level = 0.0;
++            }
++        }
++    }
++
++    pub fn is_enabled(&self) -> bool {
++        self.enabled.load(Ordering::Relaxed)
++    }
++
++    /// Band count to fold the spectrum into, clamped to a sane range.
++    pub fn set_bands(&self, bands: usize) {
++        let bands = bands.clamp(MIN_BANDS, MAX_BANDS);
++        if self.bands.swap(bands as u32, Ordering::Relaxed) as usize != bands {
++            let mut inner = self.inner.lock().unwrap();
++            inner.levels = vec![0.0; bands];
++        }
++    }
++
++    pub fn bands(&self) -> usize {
++        self.bands.load(Ordering::Relaxed) as usize
++    }
++
++    pub fn set_fps(&self, fps: u32) {
++        self.fps.store(fps.clamp(MIN_FPS, MAX_FPS), Ordering::Relaxed);
++    }
++
++    pub fn fps(&self) -> u32 {
++        self.fps.load(Ordering::Relaxed).clamp(MIN_FPS, MAX_FPS)
++    }
++
++    /// Analyse interleaved samples decoded at `sample_rate`.
++    ///
++    /// Called from the decode worker; a contended lock simply drops the samples,
++    /// which is invisible to the listener and keeps the worker moving.
++    pub fn push(&self, samples: &[f32], channels: u32, sample_rate: u32) {
++        if !self.is_enabled() || samples.is_empty() {
++            return;
++        }
++        let channels = channels.max(1) as usize;
++        let Ok(mut inner) = self.inner.try_lock() else {
++            return;
++        };
++
++        if inner.sample_rate != sample_rate || inner.channels != channels as u32 {
++            inner.sample_rate = sample_rate;
++            inner.channels = channels as u32;
++            inner.position = 0;
++            inner.stale = true;
++        }
++
++        let mut index = 0;
++        while index + channels <= samples.len() {
++            let mut sum = 0.0;
++            for channel in 0..channels {
++                sum += samples[index + channel];
++            }
++            let position = inner.position;
++            inner.window[position] = sum / channels as f32;
++            inner.position = position + 1;
++            index += channels;
++
++            if inner.position == WINDOW {
++                inner.position = 0;
++                let bands = self.bands.load(Ordering::Relaxed) as usize;
++                Self::analyse(&mut inner, bands);
++                inner.stale = false;
++                self.seq.fetch_add(1, Ordering::Relaxed);
++            }
++        }
++    }
++
++    /// The latest frame, if a new one has been produced since `seq`.
++    pub fn frame_if_new(&self, seq: u64) -> Option<SpectrumFrame> {
++        let inner = self.inner.lock().unwrap();
++        if inner.stale || inner.frame.seq == seq || inner.frame.bands.is_empty() {
++            return None;
++        }
++        Some(inner.frame.clone())
++    }
++
++    /// Window, transform, fold into bands, smooth — all in place.
++    fn analyse(inner: &mut Inner, bands: usize) {
++        let n = WINDOW;
++        let rate = inner.sample_rate.max(1) as f32;
++
++        // Hann window, written straight into the real scratch buffer.
++        for i in 0..n {
++            let taper = 0.5 - 0.5 * (2.0 * std::f32::consts::PI * i as f32 / (n - 1) as f32).cos();
++            inner.re[i] = inner.window[i] * taper;
++            inner.im[i] = 0.0;
++        }
++        fft(&mut inner.re, &mut inner.im);
++
++        if inner.levels.len() != bands {
++            inner.levels = vec![0.0; bands];
++        }
++        inner.frame.bands.resize(bands, 0);
++
++        // Logarithmic band edges over the audible range.
++        let ratio = HIGH_HZ / LOW_HZ;
++        for band in 0..bands {
++            let low = LOW_HZ * ratio.powf(band as f32 / bands as f32);
++            let high = LOW_HZ * ratio.powf((band + 1) as f32 / bands as f32);
++            let first = ((low / rate) * n as f32).floor().max(1.0) as usize;
++            let last = (((high / rate) * n as f32).ceil() as usize).min(n / 2).max(first + 1);
++
++            let mut peak = 0.0f32;
++            for bin in first..last.min(n / 2) {
++                let magnitude = (inner.re[bin] * inner.re[bin] + inner.im[bin] * inner.im[bin]).sqrt();
++                if magnitude > peak {
++                    peak = magnitude;
++                }
++            }
++
++            // Magnitude -> decibels -> 0..1, with a reference that keeps normal
++            // programme material well inside the range.
++            let db = 20.0 * (peak / (n as f32 / 2.0) + 1e-9).log10();
++            let value = ((db - FLOOR_DB) / (CEIL_DB - FLOOR_DB)).clamp(0.0, 1.0);
++
++            let level = &mut inner.levels[band];
++            let weight = if value > *level { ATTACK } else { RELEASE };
++            *level += (value - *level) * weight;
++            inner.frame.bands[band] = (*level * 255.0).clamp(0.0, 255.0) as u8;
++        }
++
++        inner.frame.seq += 1;
++    }
++}
++
++/// In-place iterative radix-2 FFT. `im` must be zeroed on entry.
++fn fft(re: &mut [f32], im: &mut [f32]) {
++    let n = re.len();
++    if n < 2 || !n.is_power_of_two() {
++        return;
++    }
++
++    // Bit-reversal permutation.
++    let mut j = 0usize;
++    for i in 1..n {
++        let mut bit = n >> 1;
++        while j & bit != 0 {
++            j ^= bit;
++            bit >>= 1;
++        }
++        j |= bit;
++        if i < j {
++            re.swap(i, j);
++            im.swap(i, j);
++        }
++    }
++
++    // Butterflies, doubling the transform length each pass.
++    let mut len = 2;
++    while len <= n {
++        let angle = -2.0 * std::f32::consts::PI / len as f32;
++        let (step_re, step_im) = (angle.cos(), angle.sin());
++        let half = len / 2;
++        let mut start = 0;
++        while start < n {
++            let (mut tw_re, mut tw_im) = (1.0f32, 0.0f32);
++            for k in 0..half {
++                let (ur, ui) = (re[start + k], im[start + k]);
++                let (xr, xi) = (re[start + k + half], im[start + k + half]);
++                let vr = xr * tw_re - xi * tw_im;
++                let vi = xr * tw_im + xi * tw_re;
++                re[start + k] = ur + vr;
++                im[start + k] = ui + vi;
++                re[start + k + half] = ur - vr;
++                im[start + k + half] = ui - vi;
++                let next_re = tw_re * step_re - tw_im * step_im;
++                tw_im = tw_re * step_im + tw_im * step_re;
++                tw_re = next_re;
++            }
++            start += len;
++        }
++        len <<= 1;
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn sine(hz: f32, rate: u32) -> Vec<f32> {
++        (0..WINDOW)
++            .map(|i| (2.0 * std::f32::consts::PI * hz * i as f32 / rate as f32).sin())
++            .collect()
++    }
++
++    /// A 1 kHz tone must land near the middle of a 40 Hz - 16 kHz log axis.
++    #[test]
++    fn a_sine_lands_in_the_expected_band() {
++        let spectrum = Spectrum::new();
++        spectrum.set_bands(32);
++        spectrum.set_enabled(true);
++        spectrum.push(&sine(1_000.0, 48_000), 1, 48_000);
++
++        let frame = spectrum.frame_if_new(0).expect("a frame was produced");
++        assert_eq!(frame.bands.len(), 32);
++
++        let peak = frame
++            .bands
++            .iter()
++            .enumerate()
++            .max_by_key(|(_, value)| **value)
++            .map(|(index, _)| index)
++            .unwrap();
++        // log10(1000/40) / log10(16000/40) * 32 ~= 17
++        assert!((15..=20).contains(&peak), "1 kHz peaked in band {peak}");
++    }
++
++    /// Band edges above Nyquist must not panic on odd rates.
++    #[test]
++    fn low_sample_rates_are_handled() {
++        let spectrum = Spectrum::new();
++        spectrum.set_bands(64);
++        spectrum.set_enabled(true);
++        // The window counts mono samples, so stereo needs twice the input.
++        let mono = sine(440.0, 8_000);
++        let mut interleaved = Vec::with_capacity(mono.len() * 2);
++        for value in mono {
++            interleaved.push(value);
++            interleaved.push(value);
++        }
++        spectrum.push(&interleaved, 2, 8_000);
++        assert!(spectrum.frame_if_new(0).is_some());
++    }
++
++    /// Silence stays at the floor and the analyser stays allocation-stable.
++    #[test]
++    fn silence_stays_at_the_floor() {
++        let spectrum = Spectrum::new();
++        spectrum.set_bands(16);
++        spectrum.set_enabled(true);
++        let silent = vec![0.0; WINDOW * 2];
++        spectrum.push(&silent, 2, 44_100);
++
++        let frame = spectrum.frame_if_new(0).expect("a frame was produced");
++        assert!(frame.bands.iter().all(|value| *value == 0), "silence was not flat");
++        // Feeding more silence keeps producing frames without panicking.
++        spectrum.push(&silent, 2, 44_100);
++        assert!(spectrum.frame_if_new(frame.seq).is_some());
++    }
++
++    /// Disabled means disabled: no frames, no work.
++    #[test]
++    fn disabled_produces_nothing() {
++        let spectrum = Spectrum::new();
++        spectrum.push(&sine(440.0, 44_100), 2, 44_100);
++        assert!(spectrum.frame_if_new(0).is_none());
++    }
++}
+diff --git a/src/App.vue b/src/App.vue
+index 471413f..a3ec3ac 100644
+--- a/src/App.vue
++++ b/src/App.vue
+@@ -69,6 +69,8 @@ import TrackInfoView from "./views/TrackInfoView.vue";
+ import SourceConfigView from "./views/SourceConfigView.vue";
+ 
+ const AmllPlayerView = defineAsyncComponent(() => import("./views/AmllPlayerView.vue"));
++const VisualizerView = defineAsyncComponent(() => import("./views/VisualizerView.vue"));
++const AudioVisualizer = defineAsyncComponent(() => import("./components/AudioVisualizer.vue"));
+ 
+ const { t, locale } = useI18n();
+ const player = usePlayerStore();
+@@ -85,6 +87,20 @@ const update = useUpdateStore();
+ const { loadingLibrary, refreshing, friendlyError, loadCachedLibrary, loadRemoteLibrary, refreshLibrary, downloadTrackMetadata } = useLibrary();
+ const view = ref<View>(getViewFromHash());
+ const baseView = ref<View>(view.value === "player" || view.value === "track-info" ? "library" : view.value);
++
++/** The full-screen visualiser is a screen of its own, not a routed view. */
++type VisualizerStyle = "mirror" | "bars" | "radial";
++function readVisualizerStyle(): VisualizerStyle {
++  const saved = localStorage.getItem("welkin-visualizer-style");
++  return saved === "bars" || saved === "radial" ? saved : "mirror";
++}
++const visualizerStyle = ref<VisualizerStyle>(readVisualizerStyle());
++const visualizerFullscreen = ref(false);
++
++function startVisualizer(style: VisualizerStyle) {
++  visualizerStyle.value = style;
++  visualizerFullscreen.value = true;
++}
+ const theme = ref<Theme>(localStorage.getItem("welkin-theme") === "dark" ? "dark" : "light");
+ const accent = ref<Accent>(readAccent());
+ const sidebarCollapsed = ref(localStorage.getItem("welkin-sidebar-collapsed") === "1");
+@@ -233,7 +249,7 @@ watch([() => player.queue, () => player.queueIndex], () => {
+ });
+ 
+ function readAccent(): Accent { const value = localStorage.getItem("welkin-accent"); return (accents.some((item) => item.id === value) ? value : "amber") as Accent; }
+-function getViewFromHash(): View { const route = window.location.hash.slice(1); return route === "settings" || route === "sponsor" || route === "player" || route === "tracks" || route === "favorites" || route === "stats" || route === "artists" || route === "albums" || route === "sources" || route === "source-config" || route === "playlists" || route === "playlist-new" || route === "lyrics-edit" || route === "track-edit" || route === "track-info" ? route : "library"; }
++function getViewFromHash(): View { const route = window.location.hash.slice(1); return route === "visualizer" || route === "settings" || route === "sponsor" || route === "player" || route === "tracks" || route === "favorites" || route === "stats" || route === "artists" || route === "albums" || route === "sources" || route === "source-config" || route === "playlists" || route === "playlist-new" || route === "lyrics-edit" || route === "track-edit" || route === "track-info" ? route : "library"; }
+ function setView(nextView: View) { view.value = nextView; window.location.hash = nextView === "library" ? "" : nextView; }
+ function clearCollectionFilters() { playlistFilter.value = null; artistFilter.value = null; albumFilter.value = null; sourceFilter.value = null; }
+ function navigate(nextView: View) { clearCollectionFilters(); setView(nextView); }
+@@ -353,6 +369,16 @@ onUnmounted(() => { savePlaybackPosition(true); stopDesktopLyrics(); stopMediaCo
+ 
+ <template>
+   <AmllPlayerView v-if="amllMounted && player.currentTrack" :active="amllActive" :return-view="baseView" @navigate="navigate" @closed="amllMounted = false" />
++  <!-- Full-screen visualiser: its own opaque screen, revealed from the picker. -->
++  <AudioVisualizer
++    v-if="visualizerFullscreen"
++    :variant="visualizerStyle"
++    :color="player.currentTrack?.color || '#ff6ad5'"
++    :bands="72"
++    :fps="30"
++    :render-scale="0.6"
++    @exit="visualizerFullscreen = false"
++  />
+   <Transition name="slide"><PlayerView v-if="view === 'player' && player.currentTrack && !lyrics.useAmll" :return-view="baseView" @navigate="navigate" @queue="toggleQueue" @open-artist="openArtist" @open-album="openAlbum" /></Transition>
+   <Transition name="info"><TrackInfoView v-if="view === 'track-info' && viewingTrack" :path="viewingTrack.path ?? null" :source-id="viewingTrack.sourceId" @back="closeTrackInfo" /></Transition>
+   <SetupWizard v-if="booted && profile.firstRun" v-model:theme="theme" v-model:accent="accent" @finish="onWizardFinish" />
+@@ -374,6 +400,7 @@ onUnmounted(() => { savePlaybackPosition(true); stopDesktopLyrics(); stopMediaCo
+           <LyricsEditorView v-else-if="baseView === 'lyrics-edit'" key="lyrics-edit" :path="editingLyricsTrack?.path ?? null" :source-id="editingLyricsTrack?.sourceId" @back="navigate('library')" @friendly-error="showError" />
+           <TrackEditorView v-else-if="baseView === 'track-edit'" key="track-edit" :path="editingTrack?.path ?? null" :source-id="editingTrack?.sourceId" @back="navigate('library')" @friendly-error="showError" />
+           <SponsorView v-else-if="baseView === 'sponsor'" key="sponsor" @back="navigate('library')" />
++          <VisualizerView v-else-if="baseView === 'visualizer'" key="visualizer" @start="startVisualizer" />
+           <SettingsView v-else key="settings" v-model:theme="theme" v-model:accent="accent" @sponsor="navigate('sponsor')" @sources="openSourceConfig('settings')" @friendly-error="showError" />
+         </Transition>
+       </main>
+diff --git a/src/components/AudioVisualizer.vue b/src/components/AudioVisualizer.vue
+new file mode 100644
+index 0000000..0a5b09c
+--- /dev/null
++++ b/src/components/AudioVisualizer.vue
+@@ -0,0 +1,409 @@
++<!--
++ Copyright 2026 Atemukesu
++ SPDX-License-Identifier: GPL-3.0-only
++-->
++
++<script setup lang="ts">
++import { onBeforeUnmount, onMounted, ref } from "vue";
++import { listen } from "@tauri-apps/api/event";
++import type { UnlistenFn } from "@tauri-apps/api/event";
++import { invoke } from "../api";
++
++/**
++ * Full-screen spectrum visualiser.
++ *
++ * Analysis lives in the playback engine (`playback::spectrum`) because decoded
++ * audio never reaches the webview on this build — the Rust engine hands it
++ * straight to the device. Frames arrive as small `audio:spectrum` events; this
++ * component only paints them, which is what keeps it usable on software-rendered
++ * kiosk builds: no Web Audio, no CORS on the stream, and a fill rate we control.
++ *
++ * The layer is deliberately opaque: it is a screen of its own, not an overlay on
++ * the library UI. Moving the mouse reveals the exit chip, which fades away again
++ * after a few idle seconds.
++ */
++const props = withDefaults(
++  defineProps<{
++    /** Note: not `style` — that name collides with Vue's CSS style binding. */
++    variant?: "mirror" | "bars" | "radial";
++    color?: string;
++    bands?: number;
++    fps?: number;
++    renderScale?: number;
++  }>(),
++  { variant: "mirror", color: "#ff6ad5", bands: 72, fps: 30, renderScale: 0.6 },
++);
++
++const emit = defineEmits<{ exit: [] }>();
++
++interface SpectrumFrame {
++  seq: number;
++  bands: number[];
++}
++
++const CHROME_TIMEOUT_MS = 2600;
++const FRAME_HOLD_MS = 250;
++const PEAK_FALL = 0.014;
++/** Floating triangles, matching the look of the reference screen. */
++const PARTICLES = 14;
++
++const host = ref<HTMLDivElement | null>(null);
++const chromeVisible = ref(true);
++
++let canvas: HTMLCanvasElement | null = null;
++let context: CanvasRenderingContext2D | null = null;
++let unlisten: UnlistenFn | null = null;
++let observer: ResizeObserver | null = null;
++let raf = 0;
++let chromeTimer = 0;
++let disposed = false;
++let width = 0;
++let height = 0;
++
++/** Latest frame from the engine, plus the decaying peak caps drawn on top. */
++let levels = new Float32Array(props.bands);
++let peaks = new Float32Array(props.bands);
++let lastFrameAt = 0;
++let drawnFrames = 0;
++let measureFrom = 0;
++let lastPaint = 0;
++
++/** Slow-drifting triangles, seeded once so the field is stable per session. */
++const particles = Array.from({ length: PARTICLES }, (_, index) => ({
++  x: (index * 137.5) % 1000 / 1000,
++  y: (index * 71.3) % 1000 / 1000,
++  size: 0.05 + ((index * 37) % 100) / 900,
++  spin: ((index * 53) % 100) / 100 * Math.PI,
++  speed: 0.000012 + ((index * 17) % 50) / 4_000_000,
++  alpha: 0.05 + ((index * 29) % 60) / 900,
++}));
++
++function resize() {
++  if (!canvas) return;
++  const cssWidth = canvas.clientWidth || window.innerWidth;
++  const cssHeight = canvas.clientHeight || window.innerHeight;
++  if (cssWidth <= 0 || cssHeight <= 0) return;
++  // The layer is full-screen and software-rendered on kiosk builds, so fill a
++  // fraction of the pixels and let the compositor scale the bars up.
++  const scale = Math.min(1, Math.max(0.25, props.renderScale)) * Math.min(window.devicePixelRatio || 1, 2);
++  width = cssWidth;
++  height = cssHeight;
++  canvas.width = Math.max(1, Math.floor(cssWidth * scale));
++  canvas.height = Math.max(1, Math.floor(cssHeight * scale));
++  context = canvas.getContext("2d");
++  if (context) context.setTransform(scale, 0, 0, scale, 0, 0);
++}
++
++/** `#rrggbb` (or `#rgb`) to `rgba(...)`. */
++function withAlpha(value: string, alpha: number): string {
++  const hex = value.replace("#", "");
++  const full = hex.length === 3 ? hex.split("").map((c) => c + c).join("") : hex;
++  const parsed = Number.parseInt(full.slice(0, 6) || "ff6ad5", 16);
++  const r = (parsed >> 16) & 255;
++  const g = (parsed >> 8) & 255;
++  const b = parsed & 255;
++  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
++}
++
++/** Opaque black base with a soft glow of the track colour behind the bars. */
++function paintBackdrop(ctx: CanvasRenderingContext2D, time: number) {
++  ctx.fillStyle = "#000000";
++  ctx.fillRect(0, 0, width, height);
++
++  const glow = ctx.createRadialGradient(width / 2, height / 2, 0, width / 2, height / 2, Math.max(width, height) * 0.62);
++  glow.addColorStop(0, withAlpha(props.color, 0.34));
++  glow.addColorStop(0.45, withAlpha(props.color, 0.12));
++  glow.addColorStop(1, "rgba(0, 0, 0, 0)");
++  ctx.fillStyle = glow;
++  ctx.fillRect(0, 0, width, height);
++
++  ctx.fillStyle = withAlpha(props.color, 1);
++  for (const particle of particles) {
++    const x = ((particle.x + time * particle.speed) % 1) * width;
++    const y = particle.y * height;
++    const size = particle.size * Math.min(width, height) * 0.5;
++    ctx.save();
++    ctx.translate(x, y);
++    ctx.rotate(particle.spin + time * 0.00004);
++    ctx.globalAlpha = particle.alpha;
++    ctx.beginPath();
++    ctx.moveTo(0, -size);
++    ctx.lineTo(size * 0.9, size * 0.7);
++    ctx.lineTo(-size * 0.9, size * 0.7);
++    ctx.closePath();
++    ctx.fill();
++    ctx.restore();
++  }
++  ctx.globalAlpha = 1;
++}
++
++/** Mirrored bars around the centre line, with a wide glow pass underneath. */
++function paintMirror(ctx: CanvasRenderingContext2D, slot: number, barWidth: number, gap: number, half: number) {
++  const centre = height / 2;
++  const white = "rgba(255, 255, 255, 0.95)";
++
++  // Glow pass first: wider, translucent, so the bright pass reads as neon.
++  ctx.fillStyle = withAlpha(props.color, 0.5);
++  for (let i = 0; i < levels.length; i += 1) {
++    const barHeight = Math.max(2, Math.pow(Math.min(1, levels[i]), 0.8) * half);
++    const x = i * slot + gap;
++    ctx.fillRect(x - barWidth * 0.35, centre - barHeight, barWidth * 1.7, barHeight * 2);
++  }
++
++  ctx.fillStyle = white;
++  for (let i = 0; i < levels.length; i += 1) {
++    const barHeight = Math.max(1.5, Math.pow(Math.min(1, levels[i]), 0.8) * half);
++    const x = i * slot + gap;
++    ctx.fillRect(x, centre - barHeight, barWidth, barHeight * 2);
++  }
++
++  // Centre rail, drawn over the bars like the reference screen.
++  ctx.fillStyle = "rgba(255, 255, 255, 0.88)";
++  ctx.fillRect(0, centre - 1, width, 2);
++
++  // Vinyl disc sitting on the rail.
++  const radius = Math.min(height * 0.11, width * 0.07);
++  ctx.fillStyle = withAlpha(props.color, 0.55);
++  ctx.beginPath();
++  ctx.arc(width * 0.5, centre, radius, 0, Math.PI * 2);
++  ctx.fill();
++  ctx.fillStyle = "rgba(255, 255, 255, 0.95)";
++  ctx.beginPath();
++  ctx.arc(width * 0.5, centre, radius * 0.22, 0, Math.PI * 2);
++  ctx.fill();
++}
++
++/** Classic bottom-anchored bars. */
++function paintBars(ctx: CanvasRenderingContext2D, slot: number, barWidth: number, gap: number) {
++  ctx.fillStyle = withAlpha(props.color, 0.45);
++  for (let i = 0; i < levels.length; i += 1) {
++    const barHeight = Math.max(2, Math.pow(Math.min(1, levels[i]), 0.85) * height * 0.94);
++    ctx.fillRect(i * slot + gap - barWidth * 0.3, height - barHeight, barWidth * 1.6, barHeight);
++  }
++  ctx.fillStyle = "rgba(255, 255, 255, 0.95)";
++  for (let i = 0; i < levels.length; i += 1) {
++    const barHeight = Math.max(1.5, Math.pow(Math.min(1, levels[i]), 0.85) * height * 0.94);
++    ctx.fillRect(i * slot + gap, height - barHeight, barWidth, barHeight);
++  }
++  ctx.fillStyle = "rgba(255, 255, 255, 0.9)";
++  for (let i = 0; i < levels.length; i += 1) {
++    const y = height - Math.min(1, peaks[i]) * height * 0.94 - 4;
++    if (y > 6) ctx.fillRect(i * slot + gap, y, barWidth, 3);
++  }
++}
++
++/** Radial spokes around the vinyl disc. */
++function paintRadial(ctx: CanvasRenderingContext2D, time: number) {
++  const centreX = width / 2;
++  const centreY = height / 2;
++  const inner = Math.min(width, height) * 0.14;
++  const outer = Math.min(width, height) * 0.44;
++  const count = levels.length;
++
++  ctx.save();
++  ctx.translate(centreX, centreY);
++  for (let i = 0; i < count; i += 1) {
++    const angle = (i / count) * Math.PI * 2 - Math.PI / 2;
++    const reach = inner + Math.pow(Math.min(1, levels[i]), 0.85) * (outer - inner);
++    ctx.save();
++    ctx.rotate(angle + time * 0.00003);
++    ctx.fillStyle = withAlpha(props.color, 0.5);
++    ctx.fillRect(-2.4, -reach, 4.8, reach - inner);
++    ctx.fillStyle = "rgba(255, 255, 255, 0.95)";
++    ctx.fillRect(-1, -reach, 2, reach - inner);
++    ctx.restore();
++  }
++  ctx.restore();
++
++  const radius = inner * 0.86;
++  ctx.fillStyle = withAlpha(props.color, 0.5);
++  ctx.beginPath();
++  ctx.arc(centreX, centreY, radius, 0, Math.PI * 2);
++  ctx.fill();
++  ctx.fillStyle = "rgba(255, 255, 255, 0.95)";
++  ctx.beginPath();
++  ctx.arc(centreX, centreY, radius * 0.2, 0, Math.PI * 2);
++  ctx.fill();
++}
++
++function paint(time: number) {
++  const ctx = context;
++  if (!ctx || width <= 0 || height <= 0) return;
++
++  paintBackdrop(ctx, time);
++
++  const count = levels.length;
++  if (!count) return;
++  const slot = width / count;
++  const barWidth = Math.max(1.5, slot * 0.34);
++  const gap = (slot - barWidth) / 2;
++
++  if (props.variant === "bars") {
++    paintBars(ctx, slot, barWidth, gap);
++  } else if (props.variant === "radial") {
++    paintRadial(ctx, time);
++  } else {
++    paintMirror(ctx, slot, barWidth, gap, height / 2 - 8);
++  }
++}
++
++function tick(now: number) {
++  if (disposed) return;
++  raf = requestAnimationFrame(tick);
++
++  if (!width || !height) resize();
++
++  const live = now - lastFrameAt < FRAME_HOLD_MS;
++  const interval = 1000 / Math.max(5, props.fps);
++  if (now - lastPaint < interval) return;
++  lastPaint = now;
++
++  for (let i = 0; i < levels.length; i += 1) {
++    if (!live) levels[i] *= 0.92; // settle instead of freezing when playback stops
++    peaks[i] = Math.max(levels[i], peaks[i] - PEAK_FALL);
++  }
++
++  paint(now);
++  drawnFrames += 1;
++
++  if (!measureFrom) measureFrom = now;
++  if (now - measureFrom >= 2000) {
++    const fps = Math.round((drawnFrames * 1000) / (now - measureFrom));
++    const box = host.value?.getBoundingClientRect();
++    void invoke("log_message", {
++      level: "info",
++      message: `[visualizer] ${props.variant} ${fps} fps, ${levels.length} bands, canvas ${width}x${height}, layer ${Math.round(box?.width ?? -1)}x${Math.round(box?.height ?? -1)}`,
++    }).catch(() => {});
++    drawnFrames = 0;
++    measureFrom = now;
++  }
++}
++
++/** Reveal the exit chip, then fade it out again while the mouse stays idle. */
++function showChrome() {
++  chromeVisible.value = true;
++  window.clearTimeout(chromeTimer);
++  chromeTimer = window.setTimeout(() => {
++    chromeVisible.value = false;
++  }, CHROME_TIMEOUT_MS);
++}
++
++async function configure(on: boolean) {
++  try {
++    await invoke("audio_spectrum_config", { enabled: on, bands: props.bands, fps: props.fps });
++  } catch (error) {
++    console.warn("[welkin] spectrum config failed", error);
++  }
++}
++
++async function subscribe() {
++  unlisten = await listen<SpectrumFrame>("audio:spectrum", (event) => {
++    const bands = event.payload?.bands ?? [];
++    if (!bands.length) return;
++    if (levels.length !== bands.length) {
++      levels = new Float32Array(bands.length);
++      peaks = new Float32Array(bands.length);
++    }
++    for (let i = 0; i < bands.length; i += 1) levels[i] = bands[i] / 255;
++    lastFrameAt = performance.now();
++  });
++}
++
++/**
++ * Escape leaves the visualiser, not the application: the Batocera launcher maps
++ * Escape to "quit" (see `WELKIN_ESC_QUITS`), so this layer has to consume the key
++ * first, in the capture phase, or the whole player would exit instead.
++ */
++function onKeydown(event: KeyboardEvent) {
++  if (event.key !== "Escape") return;
++  event.preventDefault();
++  event.stopPropagation();
++  emit("exit");
++}
++
++onMounted(async () => {
++  canvas = document.createElement("canvas");
++  canvas.style.width = "100%";
++  canvas.style.height = "100%";
++  canvas.style.display = "block";
++  host.value?.appendChild(canvas);
++  resize();
++  observer = new ResizeObserver(() => resize());
++  observer.observe(host.value as HTMLDivElement);
++  window.addEventListener("resize", resize);
++  window.addEventListener("mousemove", showChrome);
++  window.addEventListener("keydown", onKeydown, true);
++  showChrome();
++  await subscribe();
++  await configure(true);
++  raf = requestAnimationFrame(tick);
++});
++
++onBeforeUnmount(() => {
++  disposed = true;
++  cancelAnimationFrame(raf);
++  window.clearTimeout(chromeTimer);
++  observer?.disconnect();
++  observer = null;
++  window.removeEventListener("resize", resize);
++  window.removeEventListener("mousemove", showChrome);
++  window.removeEventListener("keydown", onKeydown, true);
++  unlisten?.();
++  unlisten = null;
++  void configure(false);
++  canvas?.remove();
++  canvas = null;
++  context = null;
++});
++
++defineExpose({ showChrome });
++</script>
++
++<template>
++  <!-- A screen of its own: opaque black, above every view. Inline styles on
++       purpose — this layer must not depend on utility classes being generated. -->
++  <div
++    :style="{
++      position: 'fixed',
++      inset: '0',
++      zIndex: 70,
++      background: '#000',
++      cursor: chromeVisible ? 'default' : 'none',
++    }"
++    @mousemove="showChrome"
++  >
++    <div ref="host" style="width: 100%; height: 100%"></div>
++    <Transition name="fade">
++      <div
++        v-show="chromeVisible"
++        :style="{
++          position: 'absolute',
++          left: '0',
++          right: '0',
++          bottom: '0',
++          display: 'flex',
++          flexDirection: 'column',
++          alignItems: 'center',
++          gap: '12px',
++          paddingBottom: '40px',
++        }"
++      >
++        <p style="font-size: 12px; font-weight: 600; letter-spacing: 0.25em; text-transform: uppercase; color: rgba(255,255,255,0.45)">
++          {{ $t("visualizer.exitHint") }}
++        </p>
++        <button
++          type="button"
++          style="display: flex; height: 44px; align-items: center; gap: 8px; border-radius: 999px; border: 1px solid rgba(255,255,255,0.25); background: rgba(255,255,255,0.1); padding: 0 24px; font-size: 14px; font-weight: 600; color: rgba(255,255,255,0.92)"
++          @click="emit('exit')"
++        >
++          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
++            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
++            <path d="m16 17 5-5-5-5" />
++            <path d="M21 12H9" />
++          </svg>
++          {{ $t("visualizer.exit") }}
++        </button>
++      </div>
++    </Transition>
++  </div>
++</template>
+diff --git a/src/i18n.ts b/src/i18n.ts
+index 0eba72e..4ec9b99 100644
+--- a/src/i18n.ts
++++ b/src/i18n.ts
+@@ -26,6 +26,20 @@ const messages = {
+       networkWifi: "Wi-Fi",
+       networkCellular: "蜂窝网络",
+       networkOffline: "离线",
++      visualizer: "可视化",
++    },
++    visualizer: {
++      title: "可视化",
++      hint: "挑一个效果，确认后进入全屏。播放音乐时效果最明显。",
++      mirror: "镜像频谱",
++      mirrorHint: "上下对称的柱状频谱，中央带唱片圆点",
++      bars: "经典柱状",
++      barsHint: "自底部升起，带峰值帽",
++      radial: "环形扩散",
++      radialHint: "以中心唱片为圆心向外扩散",
++      start: "开始全屏",
++      exit: "退出全屏",
++      exitHint: "移动鼠标唤出控件 · ESC 也可退出",
+     },
+     sponsor: {
+       eyebrow: "支持 / 赞助",
+@@ -808,6 +822,20 @@ const messages = {
+       networkWifi: "Wi-Fi",
+       networkCellular: "Cellular",
+       networkOffline: "Offline",
++      visualizer: "Visualizer",
++    },
++    visualizer: {
++      title: "Visualizer",
++      hint: "Pick an effect, confirm, and it takes over the screen. It looks best while music plays.",
++      mirror: "Mirror spectrum",
++      mirrorHint: "Symmetric bars around a centre rail, with a vinyl disc",
++      bars: "Classic bars",
++      barsHint: "Rising from the bottom, with peak caps",
++      radial: "Radial burst",
++      radialHint: "Ring of bars radiating from the centre disc",
++      start: "Go full screen",
++      exit: "Exit full screen",
++      exitHint: "Move the mouse for controls · ESC also exits",
+     },
+     sponsor: {
+       eyebrow: "Support / Sponsor",
+diff --git a/src/lib/app.ts b/src/lib/app.ts
+index 2d6cb15..d60d20a 100644
+--- a/src/lib/app.ts
++++ b/src/lib/app.ts
+@@ -4,9 +4,9 @@
+  */
+ 
+ import type { Component } from "vue";
+-import { Disc3, HardDrive, Heart, Library, ListMusic, Mic2, Settings2 } from "@lucide/vue";
++import { AudioLines, Disc3, HardDrive, Heart, Library, ListMusic, Mic2, Settings2 } from "@lucide/vue";
+ 
+-export type View = "library" | "tracks" | "favorites" | "stats" | "artists" | "albums" | "sources" | "source-config" | "playlists" | "playlist-new" | "lyrics-edit" | "track-edit" | "track-info" | "settings" | "sponsor" | "player";
++export type View = "library" | "tracks" | "favorites" | "stats" | "visualizer" | "artists" | "albums" | "sources" | "source-config" | "playlists" | "playlist-new" | "lyrics-edit" | "track-edit" | "track-info" | "settings" | "sponsor" | "player";
+ export type Theme = "light" | "dark";
+ export type Accent = "amber" | "orange" | "cyan" | "red" | "green" | "blue";
+ 
+@@ -32,6 +32,8 @@ export const collectionNavItems: NavItem[] = [
+ 
+ /** Library classifications, grouped with the collections in the navigation. */
+ export const classificationNavItems: NavItem[] = [
++  /** Kiosk entry point: sits between "all tracks" and "artists". */
++  { id: "visualizer", labelKey: "nav.visualizer", index: "V", icon: AudioLines },
+   { id: "artists", labelKey: "nav.artists", index: "G", icon: Mic2 },
+   { id: "albums", labelKey: "nav.albums", index: "B", icon: Disc3 },
+   { id: "sources", labelKey: "nav.sources", index: "S", icon: HardDrive },
+diff --git a/src/views/VisualizerView.vue b/src/views/VisualizerView.vue
+new file mode 100644
+index 0000000..de2ab97
+--- /dev/null
++++ b/src/views/VisualizerView.vue
+@@ -0,0 +1,87 @@
++<!--
++ Copyright 2026 Atemukesu
++ SPDX-License-Identifier: GPL-3.0-only
++-->
++
++<script setup lang="ts">
++import { ref } from "vue";
++import { useI18n } from "vue-i18n";
++import { AudioLines, AudioWaveform, Disc3, Play } from "@lucide/vue";
++
++/**
++ * Visualiser picker.
++ *
++ * Reached from the sidebar entry between "all tracks" and "artists". Choosing a
++ * style and confirming hands it to the full-screen layer in `App.vue`; the choice
++ * is remembered so the next visit starts where the last one left off.
++ */
++const emit = defineEmits<{ start: [style: "mirror" | "bars" | "radial"] }>();
++const { t } = useI18n();
++
++const STORAGE_KEY = "welkin-visualizer-style";
++type StyleId = "mirror" | "bars" | "radial";
++
++const options: { id: StyleId; labelKey: string; hintKey: string; icon: unknown }[] = [
++  { id: "mirror", labelKey: "visualizer.mirror", hintKey: "visualizer.mirrorHint", icon: AudioLines },
++  { id: "bars", labelKey: "visualizer.bars", hintKey: "visualizer.barsHint", icon: AudioWaveform },
++  { id: "radial", labelKey: "visualizer.radial", hintKey: "visualizer.radialHint", icon: Disc3 },
++];
++
++function readStored(): StyleId {
++  try {
++    const saved = localStorage.getItem(STORAGE_KEY);
++    if (saved === "mirror" || saved === "bars" || saved === "radial") return saved;
++  } catch {
++    /* private mode: fall through to the default */
++  }
++  return "mirror";
++}
++
++const selected = ref<StyleId>(readStored());
++
++function choose(id: StyleId) {
++  selected.value = id;
++  try {
++    localStorage.setItem(STORAGE_KEY, id);
++  } catch {
++    /* the choice simply does not persist */
++  }
++}
++</script>
++
++<template>
++  <section class="mx-auto flex h-full w-full max-w-3xl flex-col gap-6 px-6 py-8">
++    <header class="grid gap-2">
++      <h1 class="text-2xl font-black tracking-tight">{{ t("visualizer.title") }}</h1>
++      <p class="text-sm text-muted">{{ t("visualizer.hint") }}</p>
++    </header>
++
++    <div class="grid gap-3 sm:grid-cols-3">
++      <button
++        v-for="option in options"
++        :key="option.id"
++        type="button"
++        class="grid gap-2 border p-4 text-left transition-colors"
++        :class="selected === option.id ? 'ak-select' : 'border-line bg-surface text-muted hover:bg-fg/5 hover:text-fg'"
++        :aria-pressed="selected === option.id"
++        @click="choose(option.id)"
++      >
++        <component :is="option.icon" :size="22" :stroke-width="1.6" />
++        <strong class="text-sm font-bold uppercase tracking-[0.18em]">{{ t(option.labelKey) }}</strong>
++        <span class="text-xs leading-relaxed normal-case tracking-normal opacity-80">{{ t(option.hintKey) }}</span>
++      </button>
++    </div>
++
++    <div class="mt-auto flex flex-wrap items-center gap-3 border-t border-line pt-5">
++      <button
++        type="button"
++        class="flex h-11 items-center gap-2 px-6 text-sm font-bold uppercase tracking-[0.2em] ak-select"
++        @click="emit('start', selected)"
++      >
++        <Play :size="16" :stroke-width="2" />
++        {{ t("visualizer.start") }}
++      </button>
++      <span class="text-xs text-dim">{{ t("visualizer.exitHint") }}</span>
++    </div>
++  </section>
++</template>
