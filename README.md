@@ -42,7 +42,7 @@
 
 # Welkin
 
-基于 [Tauri 2](https://v2.tauri.app/) 的跨平台音乐播放器。通过 WebDAV 或本地文件夹读取音乐收藏，把资料、歌单与播放进度跨设备同步，并提供 AMLL 逐字歌词、桌面悬浮歌词与系统媒体控制。
+基于 [Tauri 2](https://v2.tauri.app/) 的跨平台音乐播放器。通过 WebDAV 或本地文件夹读取音乐收藏，把资料、歌单与播放进度跨设备同步，并提供 AMLL 逐字歌词、桌面悬浮歌词与系统媒体控制。音频解码与播放全部在 Rust 后端完成，前端只负责界面与队列调度。
 
 - 仓库：<https://github.com/atemukesu/WelkinPlayer>
 - 支持平台：Windows / macOS / Linux / Android
@@ -61,7 +61,7 @@
 - **歌词**：AMLL 逐字歌词渲染；在线歌词按顺序从 QQ 音乐、网易云音乐、AMLL 歌词库获取；本地同名字幕优先。
 - **桌面悬浮歌词**：独立的透明歌词窗口（Android 为系统悬浮窗）。
 - **系统媒体控制**：Windows SMTC、macOS Now Playing、Linux MPRIS、Android MediaSession。
-- **流式播放与缓存**：Rust 本地回环代理对流媒体做 Range 透传，按网络状态智能缓存，支持手动置顶。
+- **Rust 播放引擎**：Symphonia 解码、cpal 输出（桌面 WASAPI / CoreAudio / ALSA，Android Oboe / AAudio），WebDAV 流媒体边下边播并支持精准 seek；按网络状态智能缓存，支持手动置顶。
 - **跨设备同步**：昵称、歌单、收藏、播放进度等同步到指定来源。
 - **音乐管理**：元数据/封面读取与编辑、播放统计与排名。
 - **主题**：浅色/深色与多种主题色。
@@ -71,6 +71,7 @@
 | 层 | 技术 |
 | --- | --- |
 | 壳与后端 | Tauri 2（Rust） |
+| 音频引擎 | [rodio](https://github.com/RustAudio/rodio) + [cpal](https://github.com/RustAudio/cpal) + [Symphonia](https://github.com/pdeljanov/Symphonia)（Rust 解码与输出） |
 | 前端 | Vue 3 + TypeScript + Vite |
 | 状态/i18n | Pinia、vue-i18n |
 | 样式 | Tailwind CSS 4 |
@@ -116,6 +117,8 @@ pnpm tauri android build --apk # 构建 Android APK
 │  ├─ stores/           # Pinia 状态
 │  └─ lib/              # 通用工具与前端契约
 ├─ src-tauri/           # Rust 后端
+│  ├─ src/playback/     # 播放引擎（解码、音频输出、传输命令）
+│  ├─ src/streaming/    # 流缓存与智能缓存
 │  ├─ src/commands/     # Tauri 命令（媒体、WebDAV、更新等）
 │  ├─ gen/android/      # Android 工程
 │  └─ tauri.conf.json   # 应用配置（版本、更新器等）

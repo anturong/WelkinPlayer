@@ -36,9 +36,6 @@ percent-encoding = "2"
 futures-util = "0.3"
 # Zeroes the stored WebDAV password when the client is dropped.
 zeroize = "1"
-# Tiny loopback HTTP server for streaming audio to the webview (true chunked
-# proxying with Range support, keeping WebDAV credentials in Rust).
-tiny_http = "0.12"
 # Audio metadata parsing reads only the file head (HTTP Range), never the whole file.
 lofty = "0.22"
 # Decode embedded cover art and re-encode a small JPEG thumbnail for the cache.
@@ -48,7 +45,7 @@ base64 = "0.22"
 sha2 = "0.10"
 # Verifies developer-issued Pro activation codes (Ed25519-signed JWTs).
 ed25519-dalek = "2"
-# Cryptographically secure random bytes for the loopback streaming proxy token.
+# Cryptographically secure random bytes for the install identifier.
 getrandom = "0.2"
 # Enumerate installed font families for the lyrics font picker (loads the
 # platform font directories and parses each font's name table).
@@ -75,6 +72,20 @@ souvlaki = "0.8"
 # Signed, per-platform updates published as GitHub release assets. Desktop only:
 # Android queries the GitHub Releases API and downloads the APK manually instead.
 tauri-plugin-updater = "2"
+
+# Audio decoding/rendering is shared by the desktop and Android targets: `cpal`
+# drives WASAPI / CoreAudio / ALSA on desktop and Oboe (AAudio / OpenSL ES) on
+# Android, so there is no hand-written JNI. `symphonia-all` covers
+# mp3/flac/vorbis/wav/aac/mp4; `symphonia-alac` adds ALAC. `cpal-shared-stdcxx`
+# links the NDK's shared libc++ that the Tauri Android app already ships.
+[target.'cfg(any(target_os = "windows", target_os = "macos", target_os = "linux", target_os = "android"))'.dependencies]
+# rodio 0.21 owns the decode path again: `Decoder::builder().with_byte_len(len)`
+# reports the real stream length to Symphonia, which is what its demuxers need to
+# seek (rodio 0.20 hardcoded `byte_len() == None`, so every FLAC seek fell back to
+# re-decoding from sample 0). The `flac`/`mp3`/`mp4`/`vorbis`/`wav` meta-features
+# pull the matching Symphonia demuxer+codec pairs; `symphonia-alac` adds ALAC.
+# `playback` enables the cpal output stream.
+rodio = { version = "0.21", default-features = false, features = ["playback", "flac", "mp3", "mp4", "vorbis", "wav", "symphonia-alac", "symphonia-adpcm", "cpal-shared-stdcxx"] }
 
 # Android has no keyring backend of its own. `android-keyring` installs a
 # Keystore-backed credential builder over the plain `keyring` crate.

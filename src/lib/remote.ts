@@ -108,26 +108,3 @@ export function formatDuration(seconds: number): string {
   const minutes = Math.floor(seconds / 60);
   return `${minutes}:${String(seconds % 60).padStart(2, "0")}`;
 }
-
-export interface StreamEndpoint {
-  url: string;
-  token: string;
-}
-
-let streamEndpoint: StreamEndpoint | null = null;
-
-/** Cache the loopback proxy address returned by the `stream_endpoint` command. */
-export function setStreamEndpoint(endpoint: StreamEndpoint) {
-  streamEndpoint = endpoint;
-}
-
-/**
- * URL the media element plays: the Rust loopback proxy streams the WebDAV
- * response (with Range support) so credentials stay in Rust and the browser
- * handles progressive playback natively.
- */
-export function trackStreamUrl(remotePath: string, sourceId = ""): string {
-  if (!streamEndpoint) return "";
-  const query = `token=${encodeURIComponent(streamEndpoint.token)}&source=${encodeURIComponent(sourceId)}&path=${encodeURIComponent(remotePath)}`;
-  return `${streamEndpoint.url}?${query}`;
-}

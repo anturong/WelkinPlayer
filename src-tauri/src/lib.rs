@@ -7,6 +7,12 @@ mod data;
 mod platform;
 mod streaming;
 
+// The Rust playback engine runs on desktop and Android. Both use `rodio` +
+// `cpal` (WASAPI / CoreAudio / ALSA on desktop, Oboe / AAudio on Android), so
+// decoding and output never touch the webview or hand-written JNI.
+#[cfg(any(desktop, target_os = "android"))]
+mod playback;
+
 use tauri::Manager;
 
 /// Extra WebView2 browser arguments applied to every window.
@@ -66,15 +72,22 @@ pub fn run() {
 
             // Let the webview load cached cover thumbnails as plain asset URLs.
             commands::media::allow_cache_dir(app.handle());
-            match streaming::proxy::start(app.handle().clone()) {
-                Ok(stream_proxy) => {
-                    log::info!(
-                        "streaming proxy listening on 127.0.0.1:{}",
-                        stream_proxy.port
-                    );
-                    app.manage(stream_proxy);
+            match streaming::state::start(app.handle().clone()) {
+                Ok(stream_state) => {
+                    // The playback engine decodes in Rust and reads the
+                    // stream/smart caches directly; it shares their handles.
+                    #[cfg(any(desktop, target_os = "android"))]
+                    {
+                        let engine = playback::engine::start(
+                            app.handle().clone(),
+                            stream_state.cache.clone(),
+                            stream_state.smart.clone(),
+                        );
+                        app.manage(engine);
+                    }
+                    app.manage(stream_state);
                 }
-                Err(error) => log::error!("failed to start streaming proxy: {error}"),
+                Err(error) => log::error!("failed to initialize streaming caches: {error}"),
             }
             // Desktop window lifecycle: a close either quits (taking the
             // floating lyrics down with it) or, when "minimise to tray" is on,
@@ -171,21 +184,37 @@ pub fn run() {
             commands::media::load_library_cache,
             commands::media::save_library_cache,
             commands::media::refresh_source_library,
-            streaming::proxy::stream_endpoint,
-            streaming::proxy::prefetch_track,
-            streaming::proxy::report_stream_progress,
-            streaming::proxy::stream_progress,
-            streaming::proxy::sync_smart_cache,
-            streaming::proxy::pin_track,
-            streaming::proxy::unpin_track,
-            streaming::proxy::cache_status,
-            streaming::proxy::cache_usage,
-            streaming::proxy::network_status,
-            streaming::proxy::get_cache_config,
-            streaming::proxy::set_smart_cache_limit,
-            streaming::proxy::set_smart_cache_enabled,
-            streaming::proxy::set_stream_cache_enabled,
-            streaming::proxy::clear_cache,
+            streaming::state::prefetch_track,
+            streaming::state::report_stream_progress,
+            streaming::state::stream_progress,
+            streaming::state::sync_smart_cache,
+            streaming::state::pin_track,
+            streaming::state::unpin_track,
+            streaming::state::cache_status,
+            streaming::state::cache_usage,
+            streaming::state::network_status,
+            streaming::state::get_cache_config,
+            streaming::state::set_smart_cache_limit,
+            streaming::state::set_smart_cache_enabled,
+            streaming::state::set_stream_cache_enabled,
+            streaming::state::set_prefetch_seconds,
+            streaming::state::clear_cache,
+            #[cfg(any(desktop, target_os = "android"))]
+            playback::commands::audio_load,
+            #[cfg(any(desktop, target_os = "android"))]
+            playback::commands::audio_play,
+            #[cfg(any(desktop, target_os = "android"))]
+            playback::commands::audio_pause,
+            #[cfg(any(desktop, target_os = "android"))]
+            playback::commands::audio_seek,
+            #[cfg(any(desktop, target_os = "android"))]
+            playback::commands::audio_set_volume,
+            #[cfg(any(desktop, target_os = "android"))]
+            playback::commands::audio_set_mute,
+            #[cfg(any(desktop, target_os = "android"))]
+            playback::commands::audio_stop,
+            #[cfg(any(desktop, target_os = "android"))]
+            playback::commands::audio_state,
             commands::desktop_lyric::desktop_lyric_open,
             commands::desktop_lyric::desktop_lyric_close,
             commands::desktop_lyric::desktop_lyric_load,

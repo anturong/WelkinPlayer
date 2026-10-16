@@ -31,6 +31,17 @@ const desktopLyrics = useDesktopLyricsStore();
 /** Mobile control tray; desktop always renders the full set of controls. */
 const expanded = ref(false);
 
+/**
+ * Scrub state. While the user drags, the slider shows `seekValue` instead of
+ * `player.progress`, so the engine's ~4 Hz state ticks cannot yank the thumb
+ * back mid-gesture. The value is committed on pointer release (and on `change`
+ * for keyboard), never left dangling as a bare preview.
+ */
+const seekValue = ref<number | null>(null);
+const sliderValue = computed(() => seekValue.value ?? player.progress);
+let pointerSeeking = false;
+let pointerCommitDone = false;
+
 const repeatTitle = computed(() => player.repeat === "one" ? t("controls.repeatOne") : player.repeat === "all" ? t("controls.repeatAll") : t("controls.repeatOff"));
 const shuffleTitle = computed(() => player.shuffle ? t("controls.shuffleOn") : t("controls.shuffleOff"));
 const desktopLyricsTitle = computed(() => desktopLyrics.settings.enabled ? t("settings.desktopLyrics.close") : t("settings.desktopLyrics.open"));
@@ -46,21 +57,61 @@ function toggleDesktopLyrics() {
 }
 
 function onSeek(event: Event) {
-  seekPercent(Number((event.target as HTMLInputElement).value));
+  const value = Number((event.target as HTMLInputElement).value);
+  if (!Number.isFinite(value)) return;
+  seekValue.value = value;
+  pointerCommitDone = false;
+  seekPercent(value, false);
+}
+
+function commitSeek(event: Event) {
+  // `change` handles keyboard and is the normal release path, but the webview
+  // can skip it after a pointer release; a pointer gesture already commits.
+  if (pointerSeeking) return;
+  if (pointerCommitDone) {
+    pointerCommitDone = false;
+    return;
+  }
+  const value = Number((event.target as HTMLInputElement).value);
+  if (!Number.isFinite(value)) return;
+  seekValue.value = null;
+  seekPercent(value, true);
+}
+
+function beginSeek() {
+  pointerSeeking = true;
+  pointerCommitDone = false;
+  seekValue.value = player.progress;
+}
+
+function endSeek() {
+  if (!pointerSeeking) return;
+  pointerSeeking = false;
+  if (pointerCommitDone) return;
+  const value = seekValue.value;
+  if (value === null) return;
+  pointerCommitDone = true;
+  seekValue.value = null;
+  seekPercent(value, true);
 }
 </script>
 
 <template>
   <footer class="relative border-t border-line bg-surface">
     <input
-      :value="player.progress"
-      :style="{ '--fill': percent(player.progress), '--buffered': percent(player.bufferedProgress) }"
+      :value="sliderValue"
+      :style="{ '--fill': percent(sliderValue), '--buffered': percent(player.bufferedProgress) }"
       class="ak-slider absolute inset-x-0 top-0 z-10"
       type="range"
       min="0"
       max="100"
       aria-label="Playback position"
+      @pointerdown="beginSeek"
       @input="onSeek"
+      @change="commitSeek"
+      @pointerup="endSeek"
+      @pointercancel="endSeek"
+      @lostpointercapture="endSeek"
     />
     <div class="flex h-[72px] items-center gap-4 px-4">
       <div class="grid min-w-0 flex-1 grid-cols-[44px_minmax(0,1fr)] items-center gap-x-3 gap-y-0.5 md:w-[220px] md:flex-none">

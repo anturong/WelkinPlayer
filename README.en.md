@@ -4,7 +4,7 @@
 
 # Welkin
 
-A cross-platform music player built with [Tauri 2](https://v2.tauri.app/). It reads your music collection over WebDAV or from local folders, syncs your profile, playlists and playback progress across devices, and provides AMLL word-by-word lyrics, a desktop lyrics overlay, and system media controls.
+A cross-platform music player built with [Tauri 2](https://v2.tauri.app/). It reads your music collection over WebDAV or from local folders, syncs your profile, playlists and playback progress across devices, and provides AMLL word-by-word lyrics, a desktop lyrics overlay, and system media controls. Audio is decoded and played entirely in the Rust backend; the frontend only handles the UI and the play queue.
 
 - Repository: <https://github.com/atemukesu/WelkinPlayer>
 - Platforms: Windows / macOS / Linux / Android
@@ -23,7 +23,7 @@ A cross-platform music player built with [Tauri 2](https://v2.tauri.app/). It re
 - **Lyrics**: AMLL word-by-word rendering; online lyrics fetched in order from QQ Music, NetEase Cloud Music and the AMLL lyrics library; same-named local lyrics win.
 - **Desktop lyrics overlay**: A separate transparent lyrics window (a system overlay on Android).
 - **System media controls**: Windows SMTC, macOS Now Playing, Linux MPRIS, Android MediaSession.
-- **Streaming and caching**: A Rust loopback proxy streams audio with Range passthrough, caches smartly based on network state, and supports manual pinning.
+- **Rust playback engine**: Symphonia decoding and cpal output (WASAPI / CoreAudio / ALSA on desktop, Oboe / AAudio on Android); WebDAV streams play as they download with accurate seeking, caching smartly based on network state, with manual pinning.
 - **Cross-device sync**: Nickname, playlists, favorites and playback progress sync to the chosen source.
 - **Library management**: Read and edit metadata/cover art; playback statistics and rankings.
 - **Themes**: Light/dark and multiple accent colors.
@@ -33,6 +33,7 @@ A cross-platform music player built with [Tauri 2](https://v2.tauri.app/). It re
 | Layer | Technology |
 | --- | --- |
 | Shell & backend | Tauri 2 (Rust) |
+| Audio engine | [rodio](https://github.com/RustAudio/rodio) + [cpal](https://github.com/RustAudio/cpal) + [Symphonia](https://github.com/pdeljanov/Symphonia) (Rust decoding and output) |
 | Frontend | Vue 3 + TypeScript + Vite |
 | State / i18n | Pinia, vue-i18n |
 | Styling | Tailwind CSS 4 |
@@ -78,6 +79,8 @@ pnpm tauri android build --apk # Android APK
 │  ├─ stores/           # Pinia stores
 │  └─ lib/              # Shared utilities and frontend contracts
 ├─ src-tauri/           # Rust backend
+│  ├─ src/playback/     # Playback engine (decoding, audio output, transport)
+│  ├─ src/streaming/    # Stream and smart caches
 │  ├─ src/commands/     # Tauri commands (media, WebDAV, updates, ...)
 │  ├─ gen/android/      # Android project
 │  └─ tauri.conf.json   # App config (version, updater, ...)
