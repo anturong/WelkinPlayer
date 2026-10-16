@@ -1,3 +1,8 @@
+> 当前做法见仓库根目录 [`BATOCERA-FIX.md`](../BATOCERA-FIX.md) 的「最新状态（r3）」；
+> 本文其余部分是 r1/r2 时期（旧架构、需要 GStreamer payload）的记录。
+
+---
+
 # Welkin on Batocera — 个人复现版
 
 **一句话**：把 **`Welkin_1.0.2_amd64-batocera.AppImage`** 拷到 Batocera 的 `/userdata/system/`，再放一个启动脚本，Ports 菜单就能放出声音。
