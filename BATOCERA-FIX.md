@@ -511,3 +511,68 @@ Worker::pump() ──样本──► playback/spectrum.rs（2048 点加窗 FFT +
 3. 全屏层的关键布局用**内联样式**，别依赖 utility class 是否被生成
 4. `v-show` 下 watcher 默认在 DOM 更新**前**执行 → `resize()` 会读到 0×0；用 `ResizeObserver` + `flush: "post"`
 5. 覆盖正在运行的 AppImage 会 `Text file busy` → 先杀进程再换包；换完务必核对**运行中**二进制的 sha256
+
+---
+
+## 附：Batocera 环境经验（都是实测踩出来的）
+
+> 这些坑与 Welkin 无关，但在这台 Batocera 43.1（VMware 虚拟机）上装 BUA / Firefox / Steam / Heroic
+> 时全部踩过一遍，记下来省得到处再撞。
+
+### 1. ES 和桌面都以 **root** 运行 → Electron/Chromium 类 flatpak 必须 `--no-sandbox`
+
+现象：`Running as root without --no-sandbox is not supported`（Heroic、Steam 等）
+
+- **环境变量绕不过**：`ELECTRON_DISABLE_SANDBOX=1` 无效 —— 那是命令**行开关**检查，只认参数
+- 必须传参数：`flatpak run <app-id> --no-sandbox`
+- 菜单里那条 flatpak 应用是 Batocera 直接 `flatpak run <id>` 起的，**加不了参数** →
+  要么用 BUA 里那些非 flatpak 版本，要么自己写个带参数的 Ports 脚本
+  （模板见 `build/flatpak-port-template.sh`）
+
+### 2. flatpak 应用需要 session bus
+
+现象：`zypak-helper: Failed to connect to session bus … set DBUS_SESSION_BUS_ADDRESS`
+
+→ Ports 启动器里统一套 `dbus-run-session -- …`
+
+### 3. 从 ES / 桌面菜单启动的脚本**没有终端** → dialog/TUI 必须包 xterm
+
+现象：BUA 的 dialog 菜单从菜单点开"什么都不发生"（脚本 0.2 秒就退出）
+
+→ `exec xterm -T "标题" -e bash -c "bash '$MENU'; echo; echo '按回车关闭'; read -r"`
+（加 `read` 是为了出错时能看见信息）
+
+### 4. 虚拟机里「有 render node」≠「有 3D」
+
+- `ls /dev/dri` 会看到 `card0` **和** `renderD128`，但活跃的 Vulkan ICD 只有 `lvp_icd.json`
+  （lavapipe = Mesa 的**软件** Vulkan），`vulkaninfo` 显示 `deviceName = llvmpipe`
+- 后果①：**DXVK/VKD3D 不可用**（Heroic 日志：`No GPU with Vulkan 1.1 support found, DXVK will not work`）
+  → 想跑游戏只能走 WineD3D/OpenGL：`PROTON_USE_WINED3D=1`
+- 后果②：WebKit 必须走软件路径，否则**整屏白屏** → 所以**不要**按 `/dev/dri/renderD128` 是否存在
+  去自动开硬件合成，改成显式开关（我们用 `touch /userdata/system/configs/welkin/use_hw_accel`）
+
+### 5. 改 `gamelist.xml` 时别把 `xmlstarlet -L` 和重定向混用
+
+```sh
+# ✗ 会把 gamelist.xml 清空：-L 已就地写入，重定向又造了个空 tmp，最后 mv 覆盖回去
+xmlstarlet ed -P -L -s "/gameList" ... "$G" > "$G.tmp" && mv "$G.tmp" "$G"
+```
+→ 二选一：`xmlstarlet ed -P -L … "$G"`（**不要**重定向），
+或 `xmlstarlet ed -P … "$G" > "$G.tmp" && mv "$G.tmp" "$G"`（**不要** `-L`）。
+
+### 6. 国内网络 + 脚本写法
+
+- 设备直连 GitHub 大约 **5 KB/s**，`wget` 裸下必失败 →
+  用 `curl -C -` 配重试，或**在主机上用 GitHub API 抓**（本会话最稳的通道）再 `scp`
+- 大包换官方 CDN：Firefox 在 Mozilla 上是 **549 KB/s**，比 GitHub 快约 100 倍
+- `wget` **不支持 `file://`**（`curl` 支持）→ 本地测试起 `python3 -m http.server`
+- 从 Windows 生成设备脚本要小心 **BOM**：`Set-Content -Encoding UTF8` 会加 BOM，
+  导致 `#!/bin/bash` 失效（报 `No such file or directory`）→ 用 Python 以
+  `utf-8` + `newline="\n"` 写文件
+- 覆盖**正在运行**的 AppImage 会 `Text file busy` → 先停进程再换
+
+### 7. 可复用的启动器模板
+
+`build/flatpak-port-template.sh` —— flatpak 应用的 Ports 启动器（带 `dbus-run-session` +
+`--no-sandbox` + 日志）；
+`build/ports-bua.sh` —— dialog 类 TUI 的 xterm 包装写法（BUA 用这个修好的）。
