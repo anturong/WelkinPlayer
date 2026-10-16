@@ -44,18 +44,71 @@ index 77db273..d72dddf 100644
  /// Create the tray icon and its context menu.
  #[cfg(desktop)]
  pub fn init(app: &tauri::App) -> tauri::Result<()> {
+diff --git a/src-tauri/src/streaming/proxy.rs b/src-tauri/src/streaming/proxy.rs
+index bbd25ab..6b48a79 100644
+--- a/src-tauri/src/streaming/proxy.rs
++++ b/src-tauri/src/streaming/proxy.rs
+@@ -349,14 +349,16 @@ fn serve_cached_file(request: Request, file_path: &Path, remote_path: &str, rang
+         return;
+     }
+ 
++    // Same as serve_local: rewind after seek(End(0)) before streaming the body.
++    if file.seek(SeekFrom::Start(0)).is_err() {
++        let _ = request.respond(text(500, "seek failed"));
++        return;
++    }
++    // On a 32-bit target a file can exceed `usize`: advertise no fixed length and
++    // let tiny_http stream it chunked instead of truncating the body to 4 GiB.
++    let length = usize::try_from(total).ok();
+     let reader = file.take(total);
+-    let _ = request.respond(Response::new(
+-        StatusCode(200),
+-        headers,
+-        reader,
+-        Some(total as usize),
+-        None,
+-    ));
++    let _ = request.respond(Response::new(StatusCode(200), headers, reader, length, None));
+ }
+ 
+ /// Extract the start offset of a `Range` header, ignoring suffix ranges.
+@@ -436,14 +438,17 @@ fn serve_local(request: Request, root: &Path, remote_path: &str, range: Option<&
+             ));
+         }
+         None => {
++            // Rewind to the beginning: `total` came from seek(End(0)), which left
++            // the cursor at EOF, so without this the body would be empty.
++            if file.seek(SeekFrom::Start(0)).is_err() {
++                let _ = request.respond(text(500, "seek failed"));
++                return;
++            }
++            // Same 32-bit caveat as serve_cached_file: no fixed length when the
++            // file does not fit in `usize`, so the body is streamed chunked.
++            let length = usize::try_from(total).ok();
+             let reader = file.take(total);
+-            let _ = request.respond(Response::new(
+-                StatusCode(200),
+-                headers,
+-                reader,
+-                Some(total as usize),
+-                None,
+-            ));
++            let _ = request.respond(Response::new(StatusCode(200), headers, reader, length, None));
+         }
+     }
+ }
 diff --git a/src/App.vue b/src/App.vue
-index 7143cc1..0760189 100644
+index 7143cc1..073c7cf 100644
 --- a/src/App.vue
 +++ b/src/App.vue
-@@ -313,7 +313,31 @@ async function downloadMetadata(track: Track) {
+@@ -313,7 +313,30 @@ async function downloadMetadata(track: Track) {
  function toggleSidebar() { sidebarCollapsed.value = !sidebarCollapsed.value; localStorage.setItem("welkin-sidebar-collapsed", sidebarCollapsed.value ? "1" : "0"); }
  /** Re-verify the Pro license from scratch whenever the app regains focus. */
  function recheckLicense() { void license.refresh(); }
 +/**
 + * Escape quits on kiosk builds: the Batocera port launcher sets WELKIN_ESC_QUITS=1
 + * so the player returns to EmulationStation like any other emulator. Desktop
-+ * builds leave the flag unset and keep their current keyboard behaviour.
++ * builds leave the flag unset and keep their keyboard behaviour.
 + */
 +let escQuits = false;
 +async function loadEscQuit() {
@@ -68,7 +121,6 @@ index 7143cc1..0760189 100644
 +
  function onGlobalKeydown(event: KeyboardEvent) {
 +  if (escQuits && event.key === "Escape") {
-+    // 输入框里的 Escape 交给控件自己处理，别把播放器关掉
 +    const escapeTarget = event.target as HTMLElement | null;
 +    if (escapeTarget) {
 +      const tag = escapeTarget.tagName.toLowerCase();
@@ -80,7 +132,7 @@ index 7143cc1..0760189 100644
    if (event.code !== "Space" && event.key !== " ") return;
    const target = event.target as HTMLElement | null;
    if (!target) return;
-@@ -325,7 +349,7 @@ function onGlobalKeydown(event: KeyboardEvent) {
+@@ -325,7 +348,7 @@ function onGlobalKeydown(event: KeyboardEvent) {
    player.togglePlayback();
  }
  
@@ -89,6 +141,3 @@ index 7143cc1..0760189 100644
  onUnmounted(() => { savePlaybackPosition(true); stopDesktopLyrics(); stopMediaControl(); window.removeEventListener("hashchange", syncViewFromHash); window.removeEventListener("keydown", onGlobalKeydown); window.removeEventListener("beforeunload", savePlaybackPositionOnLeave); window.removeEventListener("pagehide", savePlaybackPositionOnLeave); window.removeEventListener("focus", recheckLicense); document.removeEventListener("visibilitychange", onVisibilityChange); void profile.flush(); });
  </script>
  
-warning: in the working copy of 'src-tauri/src/lib.rs', LF will be replaced by CRLF the next time Git touches it
-warning: in the working copy of 'src-tauri/src/platform/tray.rs', LF will be replaced by CRLF the next time Git touches it
-warning: in the working copy of 'src/App.vue', LF will be replaced by CRLF the next time Git touches it
