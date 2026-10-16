@@ -381,3 +381,40 @@ ssh root@<batocera> 'bash /tmp/swap-binary.sh /tmp/welkinplayer-1.0.2-patched \
      /userdata/system/Welkin_1.0.2_amd64-fixed.AppImage \
      /userdata/system/Welkin_1.0.2_amd64-batocera.AppImage'
 ```
+
+---
+
+## 全屏可视化（可选，随补丁 0003 一起构建）
+
+播放已经不在 webview 里发生（新版是 rodio + cpal 在 Rust 里直接出到设备），所以
+Web Audio 的 `AnalyserNode` 用不了。可视化因此**在 Rust 侧做分析**：
+
+```
+Worker::pump() ──样本──► playback/spectrum.rs（2048 点加窗 FFT + 对数频段 + 快攻慢放）
+                              │
+                    独立线程按订阅者帧率 emit("audio:spectrum")
+                              │
+                        AudioVisualizer.vue（canvas）
+```
+
+- 分析在样本**送入环形缓冲之后**进行 → 绝不影响音频线程；没人看时零分析、零分配、零 IPC
+- 默认 72 个频段、30 fps；`renderScale` / `fps` / `bands` 都可调（软件渲染的 kiosk 建议调低）
+
+**入口与用法**：侧栏「**可视化**」（位于「全部曲目」与「歌手」之间）→ 选择页挑效果
+（镜像频谱 / 经典柱状 / 环形扩散）→「开始全屏」→ 不透明纯黑全屏。
+**退出**：鼠标移动唤出底部「退出全屏」按钮（闲置 2.6 秒自动隐藏并隐藏光标），或按 **ESC**
+（全屏内 ESC 只退全屏，回到界面后再按才退出程序）。
+
+**实测**（Batacera 43.1 软件渲染 VM，无 3D 加速）：1080p 全屏、72 频段 → **17–20 fps**，
+进程约 16–20% CPU；三种样式均可用；连拍三帧 SSIM 0.942 / 0.924（画面确在动）。
+`cargo test --lib spectrum` 4/4 通过。
+
+**上游 PR**：<https://github.com/atemukesu/WelkinPlayer/pull/2>
+
+**实现时踩到的几个坑**（若你自己改这块，能省时间）：
+
+1. `App.vue` 的 `getViewFromHash()` 是**硬编码白名单**：新视图不登记就会"点进去立刻被弹回首页"
+2. 组件的 prop 不要取名 `style` —— 与 Vue 的 CSS `style` 绑定冲突，拿到的是规范化样式对象
+3. 全屏层的关键布局用**内联样式**，别依赖 utility class 是否被生成
+4. `v-show` 下 watcher 默认在 DOM 更新**前**执行 → `resize()` 会读到 0×0；用 `ResizeObserver` + `flush: "post"`
+5. 覆盖正在运行的 AppImage 会 `Text file busy` → 先杀进程再换包；换完务必核对**运行中**二进制的 sha256
