@@ -15,9 +15,13 @@ on:
   workflow_dispatch:
     inputs:
       upstream_tag:
-        description: '上游 tag（留空 = 取最新 release，例如 v1.0.2）'
+        description: '上游 tag（留空 = 取最新 release，用它下载 AppImage；注意 v1.0.2 的源码是旧目录结构）'
         required: false
         default: ''
+      upstream_ref:
+        description: '编二进制用的源码 ref（默认 main；补丁针对 main 的模块结构）'
+        required: false
+        default: 'main'
       force:
         description: '该版本已构建过也强制重建'
         type: boolean
@@ -47,6 +51,7 @@ jobs:
       tag: ${{ steps.pick.outputs.tag }}
       appimage_url: ${{ steps.pick.outputs.appimage_url }}
       skip: ${{ steps.pick.outputs.skip }}
+      rev: ${{ steps.pick.outputs.rev }}
     steps:
       - id: pick
         env:
@@ -66,15 +71,24 @@ jobs:
           [ -n "$url" ] || { echo "::error::在 $tag 里找不到 amd64 AppImage 资产"; exit 1; }
           echo "AppImage: $url"
           skip=false
-          if [ "$FORCE" != "true" ] && gh release view "batocera-${version}-r1" >/dev/null 2>&1; then
-            echo "已存在 release batocera-${version}-r1，跳过构建"
-            skip=true
+          rev=1
+          if gh release view "batocera-${version}-r1" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            # 该版本已经构建过：定时任务直接跳过；手动 force 则递增修订号（r2、r3…）
+            rev=$(gh release list -R "$GITHUB_REPOSITORY" --limit 200 --json tagName \
+                  --jq "[.[] | select(.tagName | startswith(\"batocera-${version}-r\"))] | length + 1")
+            if [ "$FORCE" != "true" ]; then
+              echo "已存在 batocera-${version}-r*，跳过构建（需要重建请勾选 force）"
+              skip=true
+            else
+              echo "强制重建：本次将发布 batocera-${version}-r${rev}"
+            fi
           fi
           {
             echo "tag=$tag"
             echo "version=$version"
             echo "appimage_url=$url"
             echo "skip=$skip"
+            echo "rev=$rev"
           } >> "$GITHUB_OUTPUT"
 
   # ---------------------------------------------------------------- 构建
@@ -89,11 +103,13 @@ jobs:
           ref: batocera
           path: kit
 
-      - name: 取上游源码（目标 tag）
+      # 注意：补丁针对 main 的模块结构（src-tauri/src/streaming/…），
+      # 而 v1.0.2 那个 tag 还是旧结构（src-tauri/src/proxy.rs），所以默认用 main 编二进制。
+      - name: 取上游源码（补丁基线）
         uses: actions/checkout@v4
         with:
           repository: ${{ env.UPSTREAM }}
-          ref: ${{ needs.resolve.outputs.tag }}
+          ref: ${{ inputs.upstream_ref || 'main' }}
           path: upstream
 
       - name: 系统依赖
@@ -173,10 +189,12 @@ jobs:
         env:
           VER: ${{ needs.resolve.outputs.version }}
           TAG: ${{ needs.resolve.outputs.tag }}
+          REF: ${{ inputs.upstream_ref || 'main' }}
         run: |
           set -euo pipefail
           sha=$(awk '{print $1}' sha256.txt | head -1)
-          sed -e "s|{{VERSION}}|${VER}|g" -e "s|{{TAG}}|${TAG}|g" -e "s|{{SHA256}}|${sha}|g" \
+          sed -e "s|{{VERSION}}|${VER}|g" -e "s|{{TAG}}|${TAG}|g" \
+              -e "s|{{REF}}|${REF}|g" -e "s|{{SHA256}}|${sha}|g" \
               kit/batocera/RELEASE-NOTES-TEMPLATE.md > notes.md
           cat notes.md
 
@@ -188,7 +206,7 @@ jobs:
           set -euo pipefail
           tag="batocera-${VER}-r1"
           gh release create "$tag" \
-            --title "Batocera 可用版 ${VER}（含本地音源修复 + Escape 退出）" \
+            --title "Batocera 可用版 ${VER}-r${REV}（含本地音源修复 + Escape 退出）" \
             --notes-file notes.md \
             "Welkin_${VER}_amd64-batocera.AppImage" \
             "welkinplayer-${VER}-patched" \
