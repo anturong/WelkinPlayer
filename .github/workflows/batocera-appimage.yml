@@ -1,29 +1,32 @@
 name: Build Batocera AppImage
 
-# 上游发新版本后自动产出「可用的 Batocera AppImage」并发 Release，不需要人工介入。
+# 上游发新版本后产出「可直接用于 Batocera 的 AppImage」并发 Release。
 #
 # 触发方式：
-#   - 手动：Actions -> Build Batocera AppImage -> Run workflow（可指定上游 tag、可强制重建）
+#   - 手动：Actions -> Build Batocera AppImage -> Run workflow（可指定上游 tag/源码 ref、可强制重建）
 #   - 定时：每天检查一次上游 release，有新版就自动构建
 #   - 打 rebuild-* tag 触发
 #
-# 产物 = 上游 AppImage（含其自带 WebKit/GTK 栈）
-#        + GStreamer/libav 闭包（解决"零插件→一播放就崩"）
-#        + 上游源码打补丁后重编的 welkinplayer（解决"本地音源无声"，以及 Escape 退出）
+# 产物 = 上游 release 里的 AppImage（含它自带的 WebKit/GTK 栈）
+#        + Batocera 适配（替换掉打崩系统 dbus 的 libdbus、无 3D 时让 WebKit 走软件路径）
+#        + 用本仓库补丁重编的 welkinplayer（Escape 退出 + 全屏可视化）
+#
+# 不再打包 GStreamer/libav 闭包：新版播放由 rodio/symphonia 在 Rust 里解码，
+# 不经过 webview 的 GStreamer。只有上游回退到旧架构时才需要（可传 payload）。
 
 on:
   workflow_dispatch:
     inputs:
       upstream_tag:
-        description: '上游 tag（留空 = 取最新 release，用它下载 AppImage；注意 v1.0.2 的源码是旧目录结构）'
+        description: '上游 tag（留空 = 取最新 release，用它下载 AppImage 外壳）'
         required: false
         default: ''
       upstream_ref:
-        description: '编二进制用的源码 ref（默认钉在上游新架构的 main；补丁若失配会明确报错）'
+        description: '编二进制用的源码 ref（默认钉在上游新架构的 main；补丁失配会明确报错）'
         required: false
         default: '0c50d2bddd81289e1705642a97e82da6ef220bbf'
       force:
-        description: '该版本已构建过也强制重建'
+        description: '该版本已构建过也强制重建（自动递增修订号 r2、r3…）'
         type: boolean
         default: false
   schedule:
@@ -73,7 +76,6 @@ jobs:
           skip=false
           rev=1
           if gh release view "batocera-${version}-r1" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            # 该版本已经构建过：定时任务直接跳过；手动 force 则递增修订号（r2、r3…）
             rev=$(gh release list -R "$GITHUB_REPOSITORY" --limit 200 --json tagName \
                   --jq "[.[] | select(.tagName | startswith(\"batocera-${version}-r\"))] | length + 1")
             if [ "$FORCE" != "true" ]; then
@@ -103,8 +105,6 @@ jobs:
           ref: batocera
           path: kit
 
-      # 注意：补丁针对 main 的模块结构（src-tauri/src/streaming/…），
-      # 而 v1.0.2 那个 tag 还是旧结构（src-tauri/src/proxy.rs），所以默认用 main 编二进制。
       - name: 取上游源码（补丁基线）
         uses: actions/checkout@v4
         with:
@@ -116,10 +116,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            squashfs-tools python3-pip file pkg-config patchelf \
+            squashfs-tools file pkg-config patchelf \
             libgtk-3-dev libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev \
             libsoup-3.0-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev
-          pip3 install --quiet zstandard
 
       - uses: actions/setup-node@v4
         with:
@@ -130,10 +129,10 @@ jobs:
         with:
           workspaces: upstream/src-tauri
 
-      - name: 下载上游 AppImage
+      - name: 下载上游 AppImage（外壳）
         run: curl -fL --retry 3 -o upstream.AppImage "${{ needs.resolve.outputs.appimage_url }}"
 
-      - name: 打补丁（本地音源修复 + Escape 退出）
+      - name: 打补丁（Escape 退出 + 全屏可视化）
         working-directory: upstream
         run: |
           set -euo pipefail
@@ -141,23 +140,25 @@ jobs:
           for p in ../kit/batocera/patches/*.diff; do
             echo "== 应用 $p"
             git apply --verbose "$p" || {
-              echo "::error::补丁 $p 无法应用到 ${{ needs.resolve.outputs.tag }}，需要先更新补丁"
+              echo "::error::补丁 $p 无法应用到 ${{ inputs.upstream_ref || 'main' }}，需要先更新补丁"
               exit 1
             }
           done
 
-      - name: 构建前端 + 二进制
+      - name: 构建前端 + 单测 + 二进制
         working-directory: upstream
         run: |
           set -euo pipefail
           pnpm install --frozen-lockfile
-          pnpm build
+          pnpm build                       # 必须先建前端：lib 里的 generate_context! 会读 dist
+          cargo test --lib --quiet         # 频谱分析等单测（4 个频谱用例）
           # 必须走 tauri CLI：裸 cargo build 不会把前端资源嵌进二进制（启动会白屏）
           node_modules/.bin/tauri build --no-bundle
 
-      - name: 校验前端已嵌入
+      - name: 校验二进制（前端已嵌入 + 补丁痕迹）
         working-directory: upstream
         run: |
+          set -euo pipefail
           bin=src-tauri/target/release/welkinplayer
           ls -lh "$bin"
           for pat in desktop-lyric-overlay index.html; do
@@ -165,31 +166,31 @@ jobs:
             echo "$pat -> $n"
             [ "$n" -ge 1 ] || { echo "::error::前端资源没有嵌入二进制"; exit 1; }
           done
+          for pat in esc_quit_enabled audio_spectrum_config "audio:spectrum"; do
+            n=$(grep -a -c "$pat" "$bin" || true)
+            echo "$pat -> $n"
+            [ "$n" -ge 1 ] || { echo "::error::补丁痕迹缺失：$pat"; exit 1; }
+          done
 
-      - name: 生成 GStreamer / libav payload
-        working-directory: kit
-        run: python3 batocera/build/fetch-payload.py --out "$PWD/payload"
-
-      - name: 重打包成自包含 AppImage 并换入新二进制
+      - name: 重打包成 Batocera 版并换入新二进制
         env:
           VER: ${{ needs.resolve.outputs.version }}
         run: |
           set -euo pipefail
-          bash kit/batocera/build/repack-welkin.sh upstream.AppImage kit/payload fixed.AppImage
+          bash kit/batocera/build/repack-welkin.sh upstream.AppImage - fixed.AppImage
           bash kit/batocera/build/swap-binary.sh \
             upstream/src-tauri/target/release/welkinplayer \
             fixed.AppImage \
             "Welkin_${VER}_amd64-batocera.AppImage"
           ls -lh *.AppImage
           sha256sum *.AppImage | tee sha256.txt
-          tar -I 'zstd -19 -T0' -cf welkin-payload.tar.zst -C kit payload
           cp upstream/src-tauri/target/release/welkinplayer welkinplayer-${VER}-patched
 
       - name: 生成 Release 说明
         env:
           VER: ${{ needs.resolve.outputs.version }}
           TAG: ${{ needs.resolve.outputs.tag }}
-          REF: ${{ inputs.upstream_ref || 'main' }}
+          REF: ${{ inputs.upstream_ref || '0c50d2bddd81289e1705642a97e82da6ef220bbf' }}
         run: |
           set -euo pipefail
           sha=$(awk '{print $1}' sha256.txt | head -1)
@@ -202,18 +203,19 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VER: ${{ needs.resolve.outputs.version }}
+          REV: ${{ needs.resolve.outputs.rev }}
         run: |
           set -euo pipefail
-          tag="batocera-${VER}-r1"
+          tag="batocera-${VER}-r${REV}"
           gh release create "$tag" \
-            --title "Batocera 可用版 ${VER}-r${REV}（含本地音源修复 + Escape 退出）" \
+            --title "Batocera 可用版 ${VER}-r${REV}（Escape 退出 + 全屏可视化）" \
             --notes-file notes.md \
             "Welkin_${VER}_amd64-batocera.AppImage" \
             "welkinplayer-${VER}-patched" \
-            welkin-payload.tar.zst \
-            kit/batocera/build/build-patched.sh \
+            kit/batocera/build/repack-welkin.sh \
             kit/batocera/build/swap-binary.sh \
-            kit/batocera/patches/0001-streaming-rewind.diff \
+            kit/batocera/build/build-patched.sh \
             kit/batocera/patches/0002-escape-quit.diff \
+            kit/batocera/patches/0003-audio-visualizer.diff \
             kit/batocera/README.md
           gh release view "$tag"
