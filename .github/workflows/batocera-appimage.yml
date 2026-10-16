@@ -19,9 +19,9 @@ on:
         required: false
         default: ''
       upstream_ref:
-        description: '编二进制用的源码 ref（默认 main；补丁针对 main 的模块结构）'
+        description: '编二进制用的源码 ref（默认钉在补丁已验证的提交；上游 main 重构后补丁需要先 rebase）'
         required: false
-        default: 'main'
+        default: 'b37b132'
       force:
         description: '该版本已构建过也强制重建'
         type: boolean
@@ -109,7 +109,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ${{ env.UPSTREAM }}
-          ref: ${{ inputs.upstream_ref || 'main' }}
+          ref: ${{ inputs.upstream_ref || 'b37b132' }}
           path: upstream
 
       - name: 系统依赖
