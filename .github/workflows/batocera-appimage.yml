@@ -19,9 +19,9 @@ on:
         required: false
         default: ''
       upstream_ref:
-        description: '编二进制用的源码 ref（默认钉在补丁已验证的提交；上游 main 重构后补丁需要先 rebase）'
+        description: '编二进制用的源码 ref（默认钉在上游新架构的 main；补丁若失配会明确报错）'
         required: false
-        default: 'b37b1322470c5d43d706d3f047dab11173e3d0f8'
+        default: '0c50d2bddd81289e1705642a97e82da6ef220bbf'
       force:
         description: '该版本已构建过也强制重建'
         type: boolean
@@ -109,7 +109,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ${{ env.UPSTREAM }}
-          ref: ${{ inputs.upstream_ref || 'b37b1322470c5d43d706d3f047dab11173e3d0f8' }}
+          ref: ${{ inputs.upstream_ref || '0c50d2bddd81289e1705642a97e82da6ef220bbf' }}
           path: upstream
 
       - name: 系统依赖
